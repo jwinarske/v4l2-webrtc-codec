@@ -1,0 +1,38 @@
+# v4l2-webrtc-codec — GN build.
+#
+# Absorbed into libwebrtc.so behind `lw_enable_v4l2_codec=true` when pulled
+# into the webrtc checkout as a gclient custom dep. Also builds standalone
+# against a webrtc checkout for dev + visl/vicodec CI.
+
+import("//build/config/linux/pkg_config.gni")
+
+declare_args() {
+  # Set true in the libwebrtc GN args to statically absorb this decoder.
+  lw_enable_v4l2_codec = false
+}
+
+config("v4l2wc_public_config") {
+  include_dirs = [
+    "include",
+    "third_party/lw_abi",
+  ]
+}
+
+# Public C entry + the decoder/factory. Hidden visibility: only the C entry
+# points are exported by the absorbing libwebrtc.so (CI symbol audit).
+source_set("v4l2wc") {
+  public = [ "include/v4l2wc/v4l2wc.h" ]
+  sources = [
+    # src/factory.cc
+    # src/v4l2_decoder.cc
+    # src/dmabuf_frame_buffer.cc   # emits LwDmabufDescriptor-carrying buffers
+    # parse/h264/...
+  ]
+  public_configs = [ ":v4l2wc_public_config" ]
+  configs += [ "//build/config/gcc:symbol_visibility_hidden" ]
+  deps = [
+    "//api/video_codecs:video_codecs_api",
+    "//api/video:video_frame",
+    "//rtc_base",
+  ]
+}
