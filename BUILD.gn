@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Joel Winarske
+# SPDX-License-Identifier: MIT
+
 # v4l2-webrtc-codec — GN build.
 #
 # Absorbed into libwebrtc.so behind `lw_enable_v4l2_codec=true` when pulled

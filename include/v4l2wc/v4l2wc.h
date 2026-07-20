@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Joel Winarske
+// SPDX-License-Identifier: MIT
+
 /*
  * v4l2wc.h — public C entry point for v4l2-webrtc-codec.
  *

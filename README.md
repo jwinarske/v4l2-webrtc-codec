@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Joel Winarske
+SPDX-License-Identifier: MIT
+-->
+
 # v4l2-webrtc-codec
 
 Stateless (rkvdec2/rkvdec via the V4L2 request API) and stateful (Venus)
