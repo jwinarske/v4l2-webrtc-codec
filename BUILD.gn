@@ -23,19 +23,40 @@ config("v4l2wc_public_config") {
 
 # Public C entry + the decoder/factory. Hidden visibility: only the C entry
 # points are exported by the absorbing libwebrtc.so (CI symbol audit).
+#
+# The stateful decoder reuses drm-cxx's V4l2DecoderSource (decode + DMA-BUF
+# export) rather than reimplementing V4L2; it wraps each decoded NV12 buffer as
+# the fork's LwNativeVideoFrameBuffer. The pure-logic parse/ layer (built and
+# fuzzed standalone via CMakeLists.txt) is compiled in here for SPS-based
+# dimension sizing.
 source_set("v4l2wc") {
   public = [ "include/v4l2wc/v4l2wc.h" ]
   sources = [
-    # src/factory.cc
-    # src/v4l2_decoder.cc
-    # src/dmabuf_frame_buffer.cc   # emits LwDmabufDescriptor-carrying buffers
-    # parse/h264/...
+    "parse/bit_reader.h",
+    "parse/h264/nal.cc",
+    "parse/h264/nal.h",
+    "parse/h264/pps.cc",
+    "parse/h264/pps.h",
+    "parse/h264/slice_header.cc",
+    "parse/h264/slice_header.h",
+    "parse/h264/sps.cc",
+    "parse/h264/sps.h",
+    "src/v4l2_decoder.cc",
+    "src/v4l2_decoder.h",
+    "src/v4l2wc_factory.cc",
   ]
   public_configs = [ ":v4l2wc_public_config" ]
   configs += [ "//build/config/gcc:symbol_visibility_hidden" ]
+  include_dirs = [ "." ]  # for "parse/..." and "src/..." includes
   deps = [
-    "//api/video_codecs:video_codecs_api",
+    "//api:make_ref_counted",
     "//api/video:video_frame",
+    "//api/video_codecs:video_codecs_api",
     "//rtc_base",
+
+    # The stateful V4L2 decoder + DMA-BUF export. Pulled into the checkout as a
+    # gclient custom dep alongside this repo; the exact GN label is resolved at
+    # absorb time.
+    # "//third_party/drm-cxx:drm_cxx",
   ]
 }
