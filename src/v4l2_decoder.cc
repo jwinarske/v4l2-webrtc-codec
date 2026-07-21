@@ -5,17 +5,16 @@
 
 #include <linux/videodev2.h>
 
+#include <algorithm>
 #include <utility>
 
 #include "absl/strings/match.h"
 #include "api/make_ref_counted.h"
 #include "api/video/video_frame.h"
 #include "media/base/media_constants.h"
-
-// drm-cxx: the stateful V4L2 decode + DMA-BUF export (reused, not
-// reimplemented).
-#include <drm-cxx/scene/buffer_source.hpp>  // DmaBufDesc, AcquiredBuffer
-#include <drm-cxx/scene/v4l2_decoder_source.hpp>
+#include "modules/video_coding/codecs/h264/include/h264.h"
+#include "modules/video_coding/include/video_error_codes.h"
+#include "rtc_base/logging.h"
 
 // The shared native-buffer class and the descriptor ABI live in the libwebrtc
 // fork; absorbed in-tree, these resolve against the wrapper's include dirs.
@@ -30,44 +29,32 @@ namespace v4l2wc {
 namespace {
 
 // Context handed to LwNativeVideoFrameBuffer as (LwFrameRelease, void*). It
-// keeps the SourceHolder alive (shared_ptr) and owns the AcquiredBuffer whose
-// borrowed dmabuf fds the descriptor references, so both outlive the frame.
+// keeps the SourceHolder alive (shared_ptr) so the decoder -- and the dmabuf
+// fds the descriptor borrows -- outlive the frame, and remembers which CAPTURE
+// buffer to re-queue on release.
 struct FrameReleaseCtx {
   std::shared_ptr<SourceHolder> holder;
-  drm::scene::AcquiredBuffer acquired;
+  std::uint32_t capture_index;
 };
 
 void ReleaseFrame(void* ctx) {
   auto* c = static_cast<FrameReleaseCtx*>(ctx);
   {
     std::lock_guard<std::mutex> lock(c->holder->mutex());
-    if (c->holder->src()) {
-      c->holder->src()->release(std::move(c->acquired));  // re-QBUF CAPTURE
+    if (c->holder->dec()) {
+      c->holder->dec()->Release(c->capture_index);  // re-QBUF CAPTURE
     }
   }
   delete c;
 }
 
-// Opens a DRM device for the decoder. V4l2DecoderSource requires one for its
-// internal KMS import (unused on this path); a render node is sufficient.
-// TODO(hw-verify): use drm-cxx's exact Device open API once building in-tree.
-std::unique_ptr<drm::Device> OpenDrmDevice() {
-  // return drm::Device::open("/dev/dri/renderD128");  // exact API pending
-  return nullptr;
-}
-
 }  // namespace
-
-SourceHolder::SourceHolder(std::unique_ptr<drm::scene::V4l2DecoderSource> src,
-                           std::unique_ptr<drm::Device> dev)
-    : src_(std::move(src)), dev_(std::move(dev)) {}
-SourceHolder::~SourceHolder() = default;
 
 V4l2Decoder::V4l2Decoder(V4l2WcConfig config) : config_(config) {}
 V4l2Decoder::~V4l2Decoder() = default;
 
 bool V4l2Decoder::Configure(const Settings& /*settings*/) {
-  return true;  // the source is created lazily on the first SPS (for dims)
+  return true;  // the decoder is created lazily on the first SPS (for dims)
 }
 
 int32_t V4l2Decoder::RegisterDecodeCompleteCallback(
@@ -92,31 +79,32 @@ bool V4l2Decoder::EnsureSource(const uint8_t* data, size_t size) {
     }
   }
   if (!have_sps) {
+    RTC_LOG(LS_WARNING) << "v4l2wc: no SPS yet; waiting for a keyframe";
     return false;  // wait for a keyframe carrying an SPS
   }
-
-  auto dev = OpenDrmDevice();
-  if (!dev) {
-    return false;
-  }
-  drm::scene::V4l2DecoderConfig cfg;
-  cfg.codec_fourcc = V4L2_PIX_FMT_H264;
-  cfg.capture_fourcc = V4L2_PIX_FMT_NV12;
-  cfg.coded_width = sps.width;
-  cfg.coded_height = sps.height;
-  cfg.output_buffer_count = 4;
-  cfg.capture_buffer_count = 4;
-  cfg.output_buffer_size = static_cast<size_t>(sps.width) * sps.height;
 
   const char* path = (config_.video_device && config_.video_device[0])
                          ? config_.video_device
                          : "/dev/video10";
-  auto r = drm::scene::V4l2DecoderSource::create(*dev, path, cfg);
-  if (!r) {
+  // OUTPUT holds a single compressed access unit. width*height (the luma size)
+  // is not a safe bound -- a high-bitrate keyframe can exceed it -- so floor it
+  // at 1 MiB, which comfortably holds an SD/HD H.264 frame.
+  const std::size_t output_buffer_size = std::max<std::size_t>(
+      static_cast<std::size_t>(sps.width) * sps.height, std::size_t{1} << 20);
+
+  auto dec = V4l2M2mDecoder::Create(
+      path, V4L2_PIX_FMT_H264, V4L2_PIX_FMT_NV12, sps.width, sps.height,
+      /*output_buffer_count=*/4,
+      /*capture_buffer_count=*/6, output_buffer_size);
+  if (!dec) {
+    RTC_LOG(LS_ERROR) << "v4l2wc: V4l2M2mDecoder::Create failed on " << path
+                      << " (" << sps.width << "x" << sps.height << ")";
     return false;
   }
+  RTC_LOG(LS_INFO) << "v4l2wc: decoder created on " << path << " " << sps.width
+                   << "x" << sps.height;
   ++pool_generation_;
-  holder_ = std::make_shared<SourceHolder>(std::move(*r), std::move(dev));
+  holder_ = std::make_shared<SourceHolder>(std::move(dec));
   return true;
 }
 
@@ -126,42 +114,35 @@ void V4l2Decoder::DeliverReadyFrames(int64_t render_time_ms,
     return;
   }
   for (;;) {
-    drm::scene::AcquiredBuffer acquired;
-    DmaBufDesc dma;
+    V4l2DmaFrame f;
     {
       std::lock_guard<std::mutex> lock(holder_->mutex());
-      auto* src = holder_->src();
-      auto a = src->acquire();
-      if (!a) {
+      if (!holder_->dec()->Acquire(&f)) {
         break;  // nothing ready
       }
-      acquired = std::move(*a);
-      auto d = src->export_dma_buf();
-      if (!d) {
-        src->release(std::move(acquired));
-        break;
-      }
-      dma = *d;
     }
 
     LwDmabufDescriptor desc{};
     desc.size = sizeof(desc);
-    desc.fourcc = dma.drm_fourcc;
-    desc.modifier = dma.modifier;
-    desc.width = dma.width;
-    desc.height = dma.height;
-    desc.num_planes = dma.n_planes;
-    for (uint32_t p = 0; p < dma.n_planes && p < LW_MAX_PLANES; ++p) {
-      desc.planes[p].fd = dma.fds[p];
-      desc.planes[p].offset = dma.offsets[p];
-      desc.planes[p].pitch = dma.pitches[p];
+    desc.fourcc = f.drm_fourcc;
+    desc.modifier = f.modifier;
+    desc.width = f.width;
+    desc.height = f.height;
+    desc.num_planes = f.num_planes;
+    for (uint32_t p = 0; p < f.num_planes && p < LW_MAX_PLANES; ++p) {
+      desc.planes[p].fd = f.fds[p];
+      desc.planes[p].offset = f.offsets[p];
+      desc.planes[p].pitch = f.pitches[p];
     }
     desc.acquire_fence_fd = -1;
     desc.rtp_timestamp_us = static_cast<int64_t>(rtp_timestamp);
     desc.frame_seq = frame_seq_++;
     desc.pool_generation = pool_generation_;
 
-    auto* ctx = new FrameReleaseCtx{holder_, std::move(acquired)};
+    RTC_LOG(LS_INFO) << "v4l2wc: delivering native frame " << f.width << "x"
+                     << f.height << " fourcc=" << f.drm_fourcc
+                     << " planes=" << f.num_planes;
+    auto* ctx = new FrameReleaseCtx{holder_, f.capture_index};
     auto buffer = webrtc::make_ref_counted<libwebrtc::LwNativeVideoFrameBuffer>(
         desc, &ReleaseFrame, ctx);
 
@@ -177,36 +158,41 @@ void V4l2Decoder::DeliverReadyFrames(int64_t render_time_ms,
 int32_t V4l2Decoder::Decode(const webrtc::EncodedImage& input_image,
                             bool /*missing_frames*/, int64_t render_time_ms) {
   if (!EnsureSource(input_image.data(), input_image.size())) {
-    // No source yet (waiting for an SPS keyframe): request one.
+    // No decoder yet (waiting for an SPS keyframe): request one.
     return WEBRTC_VIDEO_CODEC_ERROR;
   }
 
   // Feed the coded frame; on a full OUTPUT queue, drive() to reclaim and retry.
-  drm::span<const std::uint8_t> coded(input_image.data(), input_image.size());
   for (int attempt = 0; attempt < 64; ++attempt) {
     std::lock_guard<std::mutex> lock(holder_->mutex());
-    auto* src = holder_->src();
-    auto s = src->submit_bitstream(coded, input_image.RtpTimestamp());
-    if (s) {
+    auto* dec = holder_->dec();
+    const SubmitResult s = dec->SubmitBitstream(
+        input_image.data(), input_image.size(), input_image.RtpTimestamp());
+    if (s == SubmitResult::kOk) {
       break;
     }
-    // Any error other than "try again" is fatal (e.g. SOURCE_CHANGE).
-    if (s.error() != std::errc::resource_unavailable_try_again) {
+    if (s != SubmitResult::kTryAgain) {
+      RTC_LOG(LS_ERROR) << "v4l2wc: submit failed (" << static_cast<int>(s)
+                        << ")";
       return WEBRTC_VIDEO_CODEC_ERROR;
     }
-    src->drive();  // reclaim OUTPUT buffers, then retry
+    if (!dec->Drive()) {  // reclaim OUTPUT buffers, then retry
+      return WEBRTC_VIDEO_CODEC_ERROR;
+    }
   }
 
   {
     std::lock_guard<std::mutex> lock(holder_->mutex());
-    holder_->src()->drive();
+    if (!holder_->dec()->Drive()) {
+      return WEBRTC_VIDEO_CODEC_ERROR;
+    }
   }
   DeliverReadyFrames(render_time_ms, input_image.RtpTimestamp());
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
 int32_t V4l2Decoder::Release() {
-  // In-flight frames hold their own shared_ptr to the source, so it survives
+  // In-flight frames hold their own shared_ptr to the decoder, so it survives
   // until the last one is released. Dropping ours stops new decodes.
   holder_.reset();
   callback_ = nullptr;
@@ -219,7 +205,11 @@ V4l2DecoderFactory::V4l2DecoderFactory(V4l2WcConfig config) : config_(config) {}
 
 std::vector<webrtc::SdpVideoFormat> V4l2DecoderFactory::GetSupportedFormats()
     const {
-  return {webrtc::SdpVideoFormat(webrtc::kH264CodecName)};
+  // Advertise the standard H.264 decoder profiles (profile-level-id,
+  // packetization-mode, level-asymmetry-allowed) so the generated answer's
+  // fmtp matches a peer's offer. A bare format without these parameters is
+  // rejected by strict peers when they apply the answer.
+  return webrtc::SupportedH264DecoderCodecs();
 }
 
 std::unique_ptr<webrtc::VideoDecoder> V4l2DecoderFactory::Create(

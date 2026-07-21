@@ -4,14 +4,12 @@
 # v4l2-webrtc-codec — GN build.
 #
 # Absorbed into libwebrtc.so behind `lw_enable_v4l2_codec=true` when pulled
-# into the webrtc checkout as a gclient custom dep. Also builds standalone
-# against a webrtc checkout for dev + visl/vicodec CI.
-
-import("//build/config/linux/pkg_config.gni")
+# into the webrtc checkout. The decoder uses only the V4L2 UAPI (no DRM/KMS,
+# no external libraries), so there is nothing to stage or link beyond webrtc.
 
 declare_args() {
-  # Set true in the libwebrtc GN args to statically absorb this decoder.
-  lw_enable_v4l2_codec = false
+  # The absorbing target (//libwebrtc) owns `lw_enable_v4l2_codec` and gates the
+  # dependency on this source_set; it is intentionally not redeclared here.
 }
 
 config("v4l2wc_public_config") {
@@ -21,14 +19,23 @@ config("v4l2wc_public_config") {
   ]
 }
 
+# The fork headers the decoder pulls in ("c/lw_video_sink.h",
+# "src/internal/lw_native_video_frame_buffer.h"). The fork is checked out at
+# //libwebrtc in the absorbing build tree.
+config("v4l2wc_private_config") {
+  include_dirs = [
+    "//libwebrtc",
+    "//libwebrtc/include",
+  ]
+}
+
 # Public C entry + the decoder/factory. Hidden visibility: only the C entry
 # points are exported by the absorbing libwebrtc.so (CI symbol audit).
 #
-# The stateful decoder reuses drm-cxx's V4l2DecoderSource (decode + DMA-BUF
-# export) rather than reimplementing V4L2; it wraps each decoded NV12 buffer as
-# the fork's LwNativeVideoFrameBuffer. The pure-logic parse/ layer (built and
-# fuzzed standalone via CMakeLists.txt) is compiled in here for SPS-based
-# dimension sizing.
+# The stateful decoder drives a V4L2 M2M device directly (decode + VIDIOC_EXPBUF
+# to DMA-BUF) and wraps each decoded NV12 buffer as the fork's
+# LwNativeVideoFrameBuffer. The pure-logic parse/ layer (built and fuzzed
+# standalone via CMakeLists.txt) is compiled in for SPS-based dimension sizing.
 source_set("v4l2wc") {
   public = [ "include/v4l2wc/v4l2wc.h" ]
   sources = [
@@ -43,20 +50,25 @@ source_set("v4l2wc") {
     "parse/h264/sps.h",
     "src/v4l2_decoder.cc",
     "src/v4l2_decoder.h",
+    "src/v4l2_m2m_decoder.cc",
+    "src/v4l2_m2m_decoder.h",
     "src/v4l2wc_factory.cc",
   ]
   public_configs = [ ":v4l2wc_public_config" ]
-  configs += [ "//build/config/gcc:symbol_visibility_hidden" ]
+  # symbol_visibility_hidden is already in the default config set; only the
+  # decoder's own C entry points are exported by the absorbing libwebrtc.so.
+  configs += [ ":v4l2wc_private_config" ]
   include_dirs = [ "." ]  # for "parse/..." and "src/..." includes
+
   deps = [
     "//api:make_ref_counted",
+    "//api/environment:environment",
+    "//api/video:encoded_image",
     "//api/video:video_frame",
     "//api/video_codecs:video_codecs_api",
-    "//rtc_base",
-
-    # The stateful V4L2 decoder + DMA-BUF export. Pulled into the checkout as a
-    # gclient custom dep alongside this repo; the exact GN label is resolved at
-    # absorb time.
-    # "//third_party/drm-cxx:drm_cxx",
+    "//media:media_constants",
+    "//modules/video_coding:webrtc_h264",
+    "//rtc_base:logging",
+    "//third_party/abseil-cpp/absl/strings:strings",
   ]
 }

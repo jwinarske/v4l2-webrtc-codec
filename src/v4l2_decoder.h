@@ -1,17 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Joel Winarske
 // SPDX-License-Identifier: MIT
 
-// Stateful hardware decoder: a webrtc::VideoDecoder that reuses drm-cxx's
-// V4l2DecoderSource (stateful V4L2 M2M decode + DMA-BUF export) and hands each
-// decoded NV12 frame to webrtc as an LwNativeVideoFrameBuffer carrying an
-// LwDmabufDescriptor. The KMS/wl import happens later, in the presenter (the
-// lw_video_sink_v1 consumer) -- this decoder only produces borrowed dmabuf fds.
+// Stateful hardware decoder: a webrtc::VideoDecoder that drives a V4L2 M2M
+// decoder (V4l2M2mDecoder) and hands each decoded NV12 frame to webrtc as an
+// LwNativeVideoFrameBuffer carrying an LwDmabufDescriptor. The KMS/EGL import
+// happens later, in the presenter (the lw_video_sink_v1 consumer) -- this
+// decoder only produces borrowed dmabuf fds. It does no DRM/KMS work itself.
 //
-// NOTE: this is compiled only when absorbed in-tree into libwebrtc.so
-// (lw_enable_v4l2_codec), where the webrtc, drm-cxx, and fork headers resolve.
-// It has NOT been built or run yet; it is written against the confirmed
-// webrtc m144 / drm-cxx / lw_video_sink.h APIs and is pending verification on
-// target hardware (bcm2835 on the Raspberry Pi validated the raw V4L2 path).
+// NOTE: compiled only when absorbed in-tree into libwebrtc.so
+// (lw_enable_v4l2_codec), where the webrtc and fork headers resolve.
 #ifndef V4L2WC_SRC_V4L2_DECODER_H_
 #define V4L2WC_SRC_V4L2_DECODER_H_
 
@@ -24,35 +21,27 @@
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/video_codecs/video_decoder.h"
 #include "api/video_codecs/video_decoder_factory.h"
+#include "src/v4l2_m2m_decoder.h"
 #include "v4l2wc/v4l2wc.h"
-
-namespace drm {
-class Device;
-namespace scene {
-class V4l2DecoderSource;
-}  // namespace scene
-}  // namespace drm
 
 namespace v4l2wc {
 
-// Serialized access to the V4L2 decoder source. A decoded frame's release
-// callback can fire on the presenter thread while Decode() runs on the webrtc
-// decoder thread, so every source call goes through this holder's mutex, and
-// in-flight frames keep it alive (shared_ptr) past decoder Release().
+// Serialized access to the V4L2 decoder. A decoded frame's release callback can
+// fire on the presenter thread while Decode() runs on the webrtc decoder
+// thread, so every decoder call goes through this holder's mutex, and in-flight
+// frames keep it alive (shared_ptr) past decoder Release().
 class SourceHolder {
  public:
-  explicit SourceHolder(std::unique_ptr<drm::scene::V4l2DecoderSource> src,
-                        std::unique_ptr<drm::Device> dev);
-  ~SourceHolder();
+  explicit SourceHolder(std::unique_ptr<V4l2M2mDecoder> dec)
+      : dec_(std::move(dec)) {}
+  ~SourceHolder() = default;
 
   std::mutex& mutex() { return m_; }
-  drm::scene::V4l2DecoderSource* src() { return src_.get(); }
+  V4l2M2mDecoder* dec() { return dec_.get(); }
 
  private:
   std::mutex m_;
-  std::unique_ptr<drm::scene::V4l2DecoderSource> src_;
-  std::unique_ptr<drm::Device>
-      dev_;  // borrowed by src_ for its internal import
+  std::unique_ptr<V4l2M2mDecoder> dec_;
 };
 
 class V4l2Decoder : public webrtc::VideoDecoder {
