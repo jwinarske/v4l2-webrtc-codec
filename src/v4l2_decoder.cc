@@ -125,10 +125,10 @@ void V4l2Decoder::DeliverReadyFrames() {
     }
 
     // V4L2 copies the OUTPUT buffer timestamp onto the matching CAPTURE buffer,
-    // so timestamp_ns carries the RTP timestamp we stored when this frame's
+    // so rtp_timestamp carries the RTP timestamp we stored when this frame's
     // bitstream was submitted -- the identity of the frame that actually popped
     // out, which (with pipeline depth) is not the just-submitted one.
-    const uint32_t rtp_timestamp = static_cast<uint32_t>(f.timestamp_ns);
+    const uint32_t rtp_timestamp = static_cast<uint32_t>(f.rtp_timestamp);
     int64_t render_time_ms = 0;
     if (auto it = render_time_by_rtp_.find(rtp_timestamp);
         it != render_time_by_rtp_.end()) {
@@ -151,7 +151,10 @@ void V4l2Decoder::DeliverReadyFrames() {
       desc.planes[p].pitch = f.pitches[p];
     }
     desc.acquire_fence_fd = -1;
-    desc.rtp_timestamp_us = static_cast<int64_t>(rtp_timestamp);
+    // rtp_timestamp_us is microseconds per the sink ABI; the RTP media clock is
+    // 90 kHz, so convert. Consumers pace on the (relative) value.
+    desc.rtp_timestamp_us =
+        static_cast<int64_t>(rtp_timestamp) * 1000000 / 90000;
     desc.frame_seq = frame_seq_++;
     desc.pool_generation = pool_generation_;
 

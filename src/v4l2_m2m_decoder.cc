@@ -209,7 +209,7 @@ V4l2M2mDecoder::~V4l2M2mDecoder() {
 
 SubmitResult V4l2M2mDecoder::SubmitBitstream(const std::uint8_t* data,
                                              std::size_t size,
-                                             std::uint64_t timestamp_ns) {
+                                             std::uint64_t rtp_timestamp) {
   if (!data || size == 0) {
     return SubmitResult::kError;
   }
@@ -236,8 +236,8 @@ SubmitResult V4l2M2mDecoder::SubmitBitstream(const std::uint8_t* data,
   // (see the DQBUF path). Pack it losslessly across the tv_sec/tv_usec split --
   // tv_usec's 0..999999 range holds the remainder exactly, so any token value
   // round-trips (the naive ns split truncated tokens not divisible by 1000).
-  buf.timestamp.tv_sec = static_cast<long>(timestamp_ns / 1000000ULL);
-  buf.timestamp.tv_usec = static_cast<long>(timestamp_ns % 1000000ULL);
+  buf.timestamp.tv_sec = static_cast<long>(rtp_timestamp / 1000000ULL);
+  buf.timestamp.tv_usec = static_cast<long>(rtp_timestamp % 1000000ULL);
   if (mplane_) {
     buf.length = 1;
     buf.m.planes = planes;
@@ -463,7 +463,7 @@ bool V4l2M2mDecoder::Drive() {
       ready_index_ = buf.index;
       // Recover the passthrough token with the same packing SubmitBitstream
       // used (tv_sec * 1e6 + tv_usec), so it round-trips exactly.
-      ready_ts_ns_ =
+      ready_rtp_ =
           static_cast<std::uint64_t>(buf.timestamp.tv_sec) * 1000000ULL +
           static_cast<std::uint64_t>(buf.timestamp.tv_usec);
     }
@@ -490,7 +490,7 @@ bool V4l2M2mDecoder::Acquire(V4l2DmaFrame* out) {
   // (same 'NV12' fourcc); the modifier distinguishes them.
   out->drm_fourcc = V4L2_PIX_FMT_NV12;
   out->modifier = cap_modifier_;
-  out->timestamp_ns = ready_ts_ns_;
+  out->rtp_timestamp = ready_rtp_;
 
   // NV12 is two DRM planes (Y then interleaved UV) from one buffer. For the
   // SAND modifier the AddFB2 stride is the image width (per drm_fourcc.h) and

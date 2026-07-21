@@ -41,7 +41,8 @@ struct V4l2DmaFrame {
   std::array<int, kMaxPlanes> fds{-1, -1, -1, -1};
   std::array<std::uint32_t, kMaxPlanes> offsets{0, 0, 0, 0};
   std::array<std::uint32_t, kMaxPlanes> pitches{0, 0, 0, 0};
-  std::uint64_t timestamp_ns = 0;
+  std::uint64_t rtp_timestamp =
+      0;  // opaque passthrough token (the frame RTP ts)
 };
 
 enum class SubmitResult {
@@ -70,7 +71,7 @@ class V4l2M2mDecoder {
 
   // Copies a coded access unit into a free OUTPUT buffer and queues it.
   SubmitResult SubmitBitstream(const std::uint8_t* data, std::size_t size,
-                               std::uint64_t timestamp_ns);
+                               std::uint64_t rtp_timestamp);
 
   // Pumps events and dequeues completed buffers without blocking: reclaims
   // OUTPUT buffers, sets up CAPTURE on the first SOURCE_CHANGE, and parks the
@@ -122,7 +123,7 @@ class V4l2M2mDecoder {
 
   bool have_ready_ = false;
   std::uint32_t ready_index_ = 0;
-  std::uint64_t ready_ts_ns_ = 0;
+  std::uint64_t ready_rtp_ = 0;
 };
 
 }  // namespace v4l2wc
