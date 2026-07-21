@@ -92,10 +92,13 @@ bool V4l2Decoder::EnsureSource(const uint8_t* data, size_t size) {
   const std::size_t output_buffer_size = std::max<std::size_t>(
       static_cast<std::size_t>(sps.width) * sps.height, std::size_t{1} << 20);
 
+  // Linear NV12: the software floor (SHM) reads it correctly and is tear-free.
+  // (SAND-tiled NV12_COL128 is the zero-copy direct-scanout format, but the vc4
+  // registry is not granting a DRM plane for it here; see V4l2M2mDecoder.)
   auto dec = V4l2M2mDecoder::Create(
       path, V4L2_PIX_FMT_H264, V4L2_PIX_FMT_NV12, sps.width, sps.height,
       /*output_buffer_count=*/4,
-      /*capture_buffer_count=*/6, output_buffer_size);
+      /*capture_buffer_count=*/16, output_buffer_size);
   if (!dec) {
     RTC_LOG(LS_ERROR) << "v4l2wc: V4l2M2mDecoder::Create failed on " << path
                       << " (" << sps.width << "x" << sps.height << ")";
@@ -108,8 +111,7 @@ bool V4l2Decoder::EnsureSource(const uint8_t* data, size_t size) {
   return true;
 }
 
-void V4l2Decoder::DeliverReadyFrames(int64_t render_time_ms,
-                                     uint32_t rtp_timestamp) {
+void V4l2Decoder::DeliverReadyFrames() {
   if (!callback_ || !holder_) {
     return;
   }
@@ -120,6 +122,20 @@ void V4l2Decoder::DeliverReadyFrames(int64_t render_time_ms,
       if (!holder_->dec()->Acquire(&f)) {
         break;  // nothing ready
       }
+    }
+
+    // V4L2 copies the OUTPUT buffer timestamp onto the matching CAPTURE buffer,
+    // so timestamp_ns carries the RTP timestamp we stored when this frame's
+    // bitstream was submitted -- the identity of the frame that actually popped
+    // out, which (with pipeline depth) is not the just-submitted one.
+    const uint32_t rtp_timestamp = static_cast<uint32_t>(f.timestamp_ns);
+    int64_t render_time_ms = 0;
+    if (auto it = render_time_by_rtp_.find(rtp_timestamp);
+        it != render_time_by_rtp_.end()) {
+      render_time_ms = it->second;
+      // Drop this and any earlier (smaller-rtp) entries: frames leave the
+      // decoder in submission order, so nothing older will be looked up again.
+      render_time_by_rtp_.erase(render_time_by_rtp_.begin(), std::next(it));
     }
 
     LwDmabufDescriptor desc{};
@@ -162,6 +178,14 @@ int32_t V4l2Decoder::Decode(const webrtc::EncodedImage& input_image,
     return WEBRTC_VIDEO_CODEC_ERROR;
   }
 
+  // Remember this frame's render time keyed by its RTP timestamp, to reattach
+  // when the (pipelined) frame pops out of CAPTURE. Bound the map so a decoder
+  // that never emits some frames can't leak; 64 covers the deepest pipeline.
+  render_time_by_rtp_[input_image.RtpTimestamp()] = render_time_ms;
+  while (render_time_by_rtp_.size() > 64) {
+    render_time_by_rtp_.erase(render_time_by_rtp_.begin());
+  }
+
   // Feed the coded frame; on a full OUTPUT queue, drive() to reclaim and retry.
   for (int attempt = 0; attempt < 64; ++attempt) {
     std::lock_guard<std::mutex> lock(holder_->mutex());
@@ -187,7 +211,7 @@ int32_t V4l2Decoder::Decode(const webrtc::EncodedImage& input_image,
       return WEBRTC_VIDEO_CODEC_ERROR;
     }
   }
-  DeliverReadyFrames(render_time_ms, input_image.RtpTimestamp());
+  DeliverReadyFrames();
   return WEBRTC_VIDEO_CODEC_OK;
 }
 

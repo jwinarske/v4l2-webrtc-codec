@@ -21,6 +21,20 @@ namespace {
 // DRM_FORMAT_MOD_LINEAR; kept local to avoid a libdrm dependency.
 constexpr std::uint64_t kModifierLinear = 0;
 
+// The Pi's native tiled decoder output: NV12 stored in 128-pixel columns.
+#ifndef V4L2_PIX_FMT_NV12_COL128
+#define V4L2_PIX_FMT_NV12_COL128 v4l2_fourcc('N', 'C', '1', '2')
+#endif
+
+// DRM_FORMAT_MOD_BROADCOM_SAND128_COL_HEIGHT(v):
+//   fourcc_mod_code(BROADCOM=7, (v << 8) | 4). The column height goes in the
+//   param; the plane advertises SAND128 (col 0) as a wildcard, so any height
+//   matches. Kept local to avoid a libdrm build dependency.
+constexpr std::uint64_t kBroadcomVendor = 7ULL << 56;
+inline std::uint64_t Sand128ColHeight(std::uint32_t col) {
+  return kBroadcomVendor | ((static_cast<std::uint64_t>(col) << 8) | 4);
+}
+
 int xioctl(int fd, unsigned long request, void* arg) {
   int r = 0;
   do {
@@ -217,9 +231,13 @@ SubmitResult V4l2M2mDecoder::SubmitBitstream(const std::uint8_t* data,
   buf.type = OutputType(mplane_);
   buf.memory = V4L2_MEMORY_MMAP;
   buf.index = idx;
-  buf.timestamp.tv_sec = static_cast<long>(timestamp_ns / 1000000000ULL);
-  buf.timestamp.tv_usec =
-      static_cast<long>((timestamp_ns % 1000000000ULL) / 1000ULL);
+  // The timestamp is an opaque passthrough token (the frame's RTP timestamp);
+  // the driver copies it to the matching CAPTURE buffer and Acquire recovers it
+  // (see the DQBUF path). Pack it losslessly across the tv_sec/tv_usec split --
+  // tv_usec's 0..999999 range holds the remainder exactly, so any token value
+  // round-trips (the naive ns split truncated tokens not divisible by 1000).
+  buf.timestamp.tv_sec = static_cast<long>(timestamp_ns / 1000000ULL);
+  buf.timestamp.tv_usec = static_cast<long>(timestamp_ns % 1000000ULL);
   if (mplane_) {
     buf.length = 1;
     buf.m.planes = planes;
@@ -257,13 +275,47 @@ bool V4l2M2mDecoder::SetupCapture() {
     cap_height_ = cfmt.fmt.pix.height;
   }
   xioctl(fd_, VIDIOC_S_FMT, &cfmt);  // pin the CAPTURE pixel format
+  std::uint32_t sizeimage = 0;
   if (mplane_) {
     cap_stride_ = cfmt.fmt.pix_mp.plane_fmt[0].bytesperline;
+    sizeimage = cfmt.fmt.pix_mp.plane_fmt[0].sizeimage;
   } else {
     cap_stride_ = cfmt.fmt.pix.bytesperline;
+    sizeimage = cfmt.fmt.pix.sizeimage;
   }
   if (cap_stride_ == 0) {
     cap_stride_ = cap_width_;  // NV12 luma stride fallback
+  }
+
+  if (capture_fourcc_ == V4L2_PIX_FMT_NV12_COL128) {
+    // SAND-tiled: 128-px columns laid consecutively. The DRM framebuffer uses
+    // fourcc NV12 + the SAND128 modifier whose param is the per-column line
+    // pitch; AddFB2 strides are the image width, and the UV plane starts after
+    // the luma rows within each column.
+    const std::uint32_t ncols = (cap_width_ + 127) / 128;
+    const std::uint32_t col_lines =
+        (ncols && sizeimage) ? sizeimage / (ncols * 128) : 0;
+    cap_modifier_ = Sand128ColHeight(col_lines);
+    cap_uv_offset_ = cap_height_ * 128;
+    RTC_LOG(LS_INFO) << "v4l2wc: SAND geom bpl=" << cap_stride_
+                     << " sizeimage=" << sizeimage << " ncols=" << ncols
+                     << " col_lines=" << col_lines
+                     << " uv_off=" << cap_uv_offset_ << " (" << cap_width_
+                     << "x" << cap_height_ << ")";
+  } else {
+    cap_modifier_ = kModifierLinear;
+    // The Y plane may be padded (the codec can align its height to 16/32/64),
+    // so the UV plane does not necessarily start at a tightly-packed
+    // stride*height. Derive its offset from the driver's sizeimage instead: for
+    // NV12 the Y plane is 2/3 of the buffer. Reading UV from the wrong offset
+    // pulls chroma out of the Y-plane padding -> a color cast (white shows
+    // red).
+    const std::uint32_t packed = cap_stride_ * cap_height_;
+    cap_uv_offset_ = sizeimage ? (sizeimage * 2u) / 3u : packed;
+    RTC_LOG(LS_INFO) << "v4l2wc: linear NV12 stride=" << cap_stride_
+                     << " sizeimage=" << sizeimage
+                     << " uv_off=" << cap_uv_offset_ << " (packed=" << packed
+                     << ") " << cap_width_ << "x" << cap_height_;
   }
 
   v4l2_requestbuffers creq{};
@@ -409,9 +461,11 @@ bool V4l2M2mDecoder::Drive() {
       }
       have_ready_ = true;
       ready_index_ = buf.index;
+      // Recover the passthrough token with the same packing SubmitBitstream
+      // used (tv_sec * 1e6 + tv_usec), so it round-trips exactly.
       ready_ts_ns_ =
-          static_cast<std::uint64_t>(buf.timestamp.tv_sec) * 1000000000ULL +
-          static_cast<std::uint64_t>(buf.timestamp.tv_usec) * 1000ULL;
+          static_cast<std::uint64_t>(buf.timestamp.tv_sec) * 1000000ULL +
+          static_cast<std::uint64_t>(buf.timestamp.tv_usec);
     }
   }
   return true;
@@ -432,25 +486,24 @@ bool V4l2M2mDecoder::Acquire(V4l2DmaFrame* out) {
   out->capture_index = idx;
   out->width = cap_width_;
   out->height = cap_height_;
-  out->drm_fourcc = capture_fourcc_;  // V4L2 NV12 fourcc == DRM_FORMAT_NV12
-  out->modifier = kModifierLinear;
+  // Both linear NV12 and the SAND-tiled NV12_COL128 present as DRM_FORMAT_NV12
+  // (same 'NV12' fourcc); the modifier distinguishes them.
+  out->drm_fourcc = V4L2_PIX_FMT_NV12;
+  out->modifier = cap_modifier_;
   out->timestamp_ns = ready_ts_ns_;
 
-  if (capture_fourcc_ == V4L2_PIX_FMT_NV12) {
-    // One contiguous buffer, two DRM planes: Y then interleaved UV.
-    out->num_planes = 2;
-    out->fds[0] = fd;
-    out->offsets[0] = 0;
-    out->pitches[0] = cap_stride_;
-    out->fds[1] = fd;
-    out->offsets[1] = cap_stride_ * cap_height_;
-    out->pitches[1] = cap_stride_;
-  } else {
-    out->num_planes = 1;
-    out->fds[0] = fd;
-    out->offsets[0] = 0;
-    out->pitches[0] = cap_stride_;
-  }
+  // NV12 is two DRM planes (Y then interleaved UV) from one buffer. For the
+  // SAND modifier the AddFB2 stride is the image width (per drm_fourcc.h) and
+  // the UV plane offset is per-column; for linear it is the row stride.
+  const std::uint32_t pitch =
+      (cap_modifier_ != kModifierLinear) ? cap_width_ : cap_stride_;
+  out->num_planes = 2;
+  out->fds[0] = fd;
+  out->offsets[0] = 0;
+  out->pitches[0] = pitch;
+  out->fds[1] = fd;
+  out->offsets[1] = cap_uv_offset_;
+  out->pitches[1] = pitch;
   return true;
 }
 

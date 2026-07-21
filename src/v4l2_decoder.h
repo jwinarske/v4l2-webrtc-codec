@@ -13,6 +13,7 @@
 #define V4L2WC_SRC_V4L2_DECODER_H_
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -59,14 +60,21 @@ class V4l2Decoder : public webrtc::VideoDecoder {
  private:
   // Lazily create the source once the first SPS gives us coded dimensions.
   bool EnsureSource(const uint8_t* data, size_t size);
-  // Drain any ready CAPTURE buffers and deliver them to `callback_`.
-  void DeliverReadyFrames(int64_t render_time_ms, uint32_t rtp_timestamp);
+  // Drain any ready CAPTURE buffers and deliver them to `callback_`. Each frame
+  // carries its own recovered RTP timestamp (V4L2 OUTPUT->CAPTURE passthrough),
+  // so a pipelined decoder pairs the frame that popped out with the render time
+  // recorded for that frame -- not the just-submitted one -- letting the
+  // receiver pace playout smoothly.
+  void DeliverReadyFrames();
 
   V4l2WcConfig config_;
   webrtc::DecodedImageCallback* callback_ = nullptr;
   std::shared_ptr<SourceHolder> holder_;  // shared with in-flight frames
   uint32_t pool_generation_ = 0;
   uint64_t frame_seq_ = 0;
+  // rtp_timestamp -> render_time_ms recorded at submit, looked up when the
+  // matching (pipelined) frame pops out of CAPTURE. Bounded to a small window.
+  std::map<uint32_t, int64_t> render_time_by_rtp_;
 };
 
 class V4l2DecoderFactory : public webrtc::VideoDecoderFactory {

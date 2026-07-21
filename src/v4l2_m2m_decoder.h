@@ -117,6 +117,8 @@ class V4l2M2mDecoder {
   std::uint32_t cap_width_ = 0;
   std::uint32_t cap_height_ = 0;
   std::uint32_t cap_stride_ = 0;
+  std::uint32_t cap_uv_offset_ = 0;  // byte offset of the UV plane
+  std::uint64_t cap_modifier_ = 0;   // DRM_FORMAT_MOD_* (0 = LINEAR, else SAND)
 
   bool have_ready_ = false;
   std::uint32_t ready_index_ = 0;
