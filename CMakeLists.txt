@@ -15,6 +15,7 @@ enable_testing()
 add_library(v4l2wc_parse STATIC
   parse/h264/nal.cc
   parse/h264/sps.cc
+  parse/h264/pps.cc
 )
 target_include_directories(v4l2wc_parse PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(v4l2wc_parse PRIVATE -Wall -Wextra)
@@ -26,3 +27,7 @@ add_test(NAME h264_nal_test COMMAND h264_nal_test)
 add_executable(h264_sps_test test/parse/h264_sps_test.cc)
 target_link_libraries(h264_sps_test PRIVATE v4l2wc_parse)
 add_test(NAME h264_sps_test COMMAND h264_sps_test)
+
+add_executable(h264_pps_test test/parse/h264_pps_test.cc)
+target_link_libraries(h264_pps_test PRIVATE v4l2wc_parse)
+add_test(NAME h264_pps_test COMMAND h264_pps_test)

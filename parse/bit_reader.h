@@ -92,6 +92,26 @@ class BitReader {
     return true;
   }
 
+  // True if RBSP payload remains before the rbsp_stop_one_bit (spec
+  // more_rbsp_data()). The stop bit is the last set bit in the buffer; anything
+  // before it is data, anything at/after it is trailing.
+  bool MoreRbspData() const {
+    size_t last = size_;
+    while (last > 0 && data_[last - 1] == 0) {
+      --last;
+    }
+    if (last == 0) {
+      return false;  // no stop bit at all
+    }
+    const uint8_t byte = data_[last - 1];
+    uint32_t lsb = 0;
+    while (((byte >> lsb) & 1u) == 0) {
+      ++lsb;
+    }
+    const size_t stop_bit_pos = (last - 1) * 8 + (7 - lsb);
+    return bit_pos_ < stop_bit_pos;
+  }
+
  private:
   const uint8_t* data_;
   size_t size_;
