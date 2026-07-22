@@ -71,10 +71,11 @@ VaapiH264Decoder::~VaapiH264Decoder() {
   if (drm_fd_ >= 0) ::close(drm_fd_);
 }
 
-bool VaapiH264Decoder::EnsureConfigured(const va::Sps& sps) {
+bool VaapiH264Decoder::EnsureConfigured(const h264::Sps& sps) {
   if (configured_) return true;
   coded_w_ = sps.pic_width_in_mbs * 16;
-  coded_h_ = sps.pic_height_in_map_units * 16 * (sps.frame_mbs_only ? 1 : 2);
+  coded_h_ =
+      sps.pic_height_in_map_units * 16 * (sps.frame_mbs_only_flag ? 1 : 2);
   VAConfigAttrib attr = {VAConfigAttribRTFormat, VA_RT_FORMAT_YUV420};
   VAConfigID cfg = 0;
   VAStatus s = va_.CreateConfig(dpy_, VAProfileH264ConstrainedBaseline,
@@ -121,7 +122,7 @@ int VaapiH264Decoder::PickFreeSlot() {
   return -1;
 }
 
-int VaapiH264Decoder::ComputePoc(const va::SliceHdr& sh, int ref_idc) {
+int VaapiH264Decoder::ComputePoc(const h264::SliceHeader& sh, int ref_idc) {
   const int MaxFrameNum = 1 << sps_.log2_max_frame_num;
   int offset;
   if (sh.idr)
@@ -137,9 +138,46 @@ int VaapiH264Decoder::ComputePoc(const va::SliceHdr& sh, int ref_idc) {
   return temp;
 }
 
-bool VaapiH264Decoder::DecodeSlice(const va::Nal& nal) {
-  va::SliceHdr sh{};
-  va::ParseSliceHdr(nal, sps_, pps_, &sh);
+bool VaapiH264Decoder::DecodeSlice(const h264::Nal& nal) {
+  // The slice parser is shared with the stateless path; it needs the SPS/PPS
+  // state gathered into a context.
+  h264::SliceContext ctx;
+  ctx.log2_max_frame_num = sps_.log2_max_frame_num;
+  ctx.pic_order_cnt_type = sps_.pic_order_cnt_type;
+  ctx.log2_max_pic_order_cnt_lsb = sps_.log2_max_pic_order_cnt_lsb;
+  ctx.delta_pic_order_always_zero_flag = sps_.delta_pic_order_always_zero_flag;
+  ctx.frame_mbs_only_flag = sps_.frame_mbs_only_flag;
+  ctx.separate_colour_plane_flag = sps_.separate_colour_plane_flag;
+  ctx.chroma_array_type =
+      sps_.separate_colour_plane_flag ? 0 : sps_.chroma_format_idc;
+  ctx.entropy_coding_mode_flag = pps_.entropy_coding_mode_flag;
+  ctx.deblocking_filter_control_present_flag =
+      pps_.deblocking_filter_control_present_flag;
+  ctx.num_slice_groups_minus1 = pps_.num_slice_groups_minus1;
+  ctx.bottom_field_pic_order_in_frame_present_flag =
+      pps_.bottom_field_pic_order_in_frame_present_flag;
+  ctx.num_ref_idx_l0_default_active_minus1 =
+      pps_.num_ref_idx_l0_default_active_minus1;
+  ctx.num_ref_idx_l1_default_active_minus1 =
+      pps_.num_ref_idx_l1_default_active_minus1;
+  ctx.weighted_pred_flag = pps_.weighted_pred_flag;
+  ctx.weighted_bipred_idc = pps_.weighted_bipred_idc;
+  ctx.redundant_pic_cnt_present_flag = pps_.redundant_pic_cnt_present_flag;
+
+  const bool idr = (nal.type == h264::NalUnitType::kSliceIdr);
+  h264::SliceHeader sh{};
+  if (!h264::ParseSliceHeader(nal.rbsp.data(), nal.rbsp.size(), nal.nal_ref_idc,
+                              idr, ctx, &sh)) {
+    RTC_LOG(LS_WARNING) << "vaapi: malformed slice header; dropping";
+    return false;
+  }
+  // The hardware addresses slice data in raw-NAL bit space.
+  std::uint32_t data_bit_offset = 0;
+  if (!h264::RbspToRawBitOffset(nal, sh.slice_data_bit_offset_rbsp,
+                                &data_bit_offset)) {
+    RTC_LOG(LS_WARNING) << "vaapi: slice data offset outside NAL; dropping";
+    return false;
+  }
   const int st = sh.slice_type % 5;  // 0=P 2=I
   const int MaxFrameNum = 1 << sps_.log2_max_frame_num;
   if (sh.idr) {
@@ -148,7 +186,7 @@ bool VaapiH264Decoder::DecodeSlice(const va::Nal& nal) {
     prev_frame_num_ = 0;
     prev_frame_num_offset_ = 0;
   }
-  int poc = ComputePoc(sh, nal.ref_idc);
+  int poc = ComputePoc(sh, nal.nal_ref_idc);
 
   int slot = PickFreeSlot();
   if (slot < 0) {
@@ -170,7 +208,7 @@ bool VaapiH264Decoder::DecodeSlice(const va::Nal& nal) {
   VAPictureParameterBufferH264 pp{};
   pp.CurrPic.picture_id = surf;
   pp.CurrPic.frame_idx = sh.frame_num;
-  pp.CurrPic.flags = nal.ref_idc ? VA_PICTURE_H264_SHORT_TERM_REFERENCE : 0;
+  pp.CurrPic.flags = nal.nal_ref_idc ? VA_PICTURE_H264_SHORT_TERM_REFERENCE : 0;
   pp.CurrPic.TopFieldOrderCnt = poc;
   pp.CurrPic.BottomFieldOrderCnt = poc;
   int nref = 0;
@@ -189,29 +227,30 @@ bool VaapiH264Decoder::DecodeSlice(const va::Nal& nal) {
   }
   pp.picture_width_in_mbs_minus1 = sps_.pic_width_in_mbs - 1;
   pp.picture_height_in_mbs_minus1 =
-      sps_.pic_height_in_map_units * (sps_.frame_mbs_only ? 1 : 2) - 1;
+      sps_.pic_height_in_map_units * (sps_.frame_mbs_only_flag ? 1 : 2) - 1;
   pp.num_ref_frames = sps_.max_num_ref_frames;
   pp.seq_fields.bits.chroma_format_idc = sps_.chroma_format_idc;
-  pp.seq_fields.bits.frame_mbs_only_flag = sps_.frame_mbs_only;
-  pp.seq_fields.bits.direct_8x8_inference_flag = sps_.direct_8x8_inference;
+  pp.seq_fields.bits.frame_mbs_only_flag = sps_.frame_mbs_only_flag;
+  pp.seq_fields.bits.direct_8x8_inference_flag = sps_.direct_8x8_inference_flag;
   pp.seq_fields.bits.log2_max_frame_num_minus4 = sps_.log2_max_frame_num - 4;
   pp.seq_fields.bits.pic_order_cnt_type = sps_.pic_order_cnt_type;
   pp.seq_fields.bits.log2_max_pic_order_cnt_lsb_minus4 =
-      sps_.log2_max_poc_lsb - 4;
-  pp.pic_fields.bits.entropy_coding_mode_flag = pps_.entropy_coding_mode;
-  pp.pic_fields.bits.weighted_pred_flag = pps_.weighted_pred;
+      sps_.log2_max_pic_order_cnt_lsb - 4;
+  pp.pic_fields.bits.entropy_coding_mode_flag = pps_.entropy_coding_mode_flag;
+  pp.pic_fields.bits.weighted_pred_flag = pps_.weighted_pred_flag;
   pp.pic_fields.bits.weighted_bipred_idc = pps_.weighted_bipred_idc;
-  pp.pic_fields.bits.transform_8x8_mode_flag = pps_.transform_8x8_mode;
-  pp.pic_fields.bits.constrained_intra_pred_flag = pps_.constrained_intra_pred;
+  pp.pic_fields.bits.transform_8x8_mode_flag = pps_.transform_8x8_mode_flag;
+  pp.pic_fields.bits.constrained_intra_pred_flag =
+      pps_.constrained_intra_pred_flag;
   pp.pic_fields.bits.pic_order_present_flag =
-      pps_.bottom_field_pic_order_present;
+      pps_.bottom_field_pic_order_in_frame_present_flag;
   pp.pic_fields.bits.deblocking_filter_control_present_flag =
-      pps_.deblocking_filter_control_present;
+      pps_.deblocking_filter_control_present_flag;
   pp.pic_fields.bits.redundant_pic_cnt_present_flag =
-      pps_.redundant_pic_cnt_present;
-  pp.pic_fields.bits.reference_pic_flag = nal.ref_idc != 0;
+      pps_.redundant_pic_cnt_present_flag;
+  pp.pic_fields.bits.reference_pic_flag = nal.nal_ref_idc != 0;
   pp.frame_num = sh.frame_num;
-  pp.pic_init_qp_minus26 = pps_.pic_init_qp - 26;
+  pp.pic_init_qp_minus26 = (pps_.pic_init_qp_minus26 + 26) - 26;
   pp.chroma_qp_index_offset = pps_.chroma_qp_index_offset;
   pp.second_chroma_qp_index_offset = pps_.second_chroma_qp_index_offset;
 
@@ -222,10 +261,10 @@ bool VaapiH264Decoder::DecodeSlice(const va::Nal& nal) {
   sp.slice_data_size = nal.raw.size();
   sp.slice_data_offset = 0;
   sp.slice_data_flag = VA_SLICE_DATA_FLAG_ALL;
-  sp.slice_data_bit_offset = sh.data_bit_offset;
-  sp.first_mb_in_slice = sh.first_mb;
+  sp.slice_data_bit_offset = data_bit_offset;
+  sp.first_mb_in_slice = sh.first_mb_in_slice;
   sp.slice_type = sh.slice_type;
-  sp.num_ref_idx_l0_active_minus1 = sh.num_ref_idx_l0_active - 1;
+  sp.num_ref_idx_l0_active_minus1 = sh.num_ref_idx_l0_active_minus1;
   sp.num_ref_idx_l1_active_minus1 = 0;
   sp.slice_qp_delta = sh.slice_qp_delta;
   for (int i = 0; i < 32; ++i) {
@@ -287,7 +326,7 @@ bool VaapiH264Decoder::DecodeSlice(const va::Nal& nal) {
   slots_[slot].height = coded_h_;
 
   // dec_ref_pic_marking: sliding window (no MMCO in this subset).
-  if (nal.ref_idc) {
+  if (nal.nal_ref_idc) {
     const int active =
         std::max<int>(1, static_cast<int>(sps_.max_num_ref_frames));
     if (static_cast<int>(dpb_.size()) >= active) {
@@ -308,23 +347,25 @@ bool VaapiH264Decoder::DecodeSlice(const va::Nal& nal) {
 SubmitResult VaapiH264Decoder::SubmitBitstream(const std::uint8_t* data,
                                                std::size_t size,
                                                std::uint64_t rtp_timestamp) {
-  auto nals = va::SplitAnnexB(data, size);
+  auto nals = h264::ParseAnnexB(data, size);
   for (auto& n : nals) {
-    if (n.type == 7) {
-      va::Sps s{};
-      if (va::ParseSps(n.rbsp.data(), n.rbsp.size(), &s)) {
+    if (n.type == h264::NalUnitType::kSps) {
+      h264::Sps s{};
+      if (h264::ParseSps(n.rbsp.data(), n.rbsp.size(), &s)) {
         if (configured_ && (s.pic_width_in_mbs * 16 != coded_w_))
           return SubmitResult::kSourceChange;
         sps_ = s;
         have_sps_ = true;
       }
-    } else if (n.type == 8) {
-      va::Pps p{};
-      if (va::ParsePps(n.rbsp.data(), n.rbsp.size(), &sps_, &p)) {
+    } else if (n.type == h264::NalUnitType::kPps) {
+      h264::Pps p{};
+      if (h264::ParsePps(n.rbsp.data(), n.rbsp.size(), &p)) {
         pps_ = p;
         have_pps_ = true;
       }
-    } else if ((n.type == 1 || n.type == 5) && have_sps_ && have_pps_) {
+    } else if ((n.type == h264::NalUnitType::kSliceNonIdr ||
+                n.type == h264::NalUnitType::kSliceIdr) &&
+               have_sps_ && have_pps_) {
       if (!EnsureConfigured(sps_)) return SubmitResult::kError;
       if (!DecodeSlice(n)) return SubmitResult::kError;
       if (have_ready_) slots_[ready_slot_].rtp = rtp_timestamp;

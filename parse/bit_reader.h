@@ -92,6 +92,9 @@ class BitReader {
     return true;
   }
 
+  // Current read position, in bits from the start of the buffer.
+  size_t bit_pos() const { return bit_pos_; }
+
   // True if RBSP payload remains before the rbsp_stop_one_bit (spec
   // more_rbsp_data()). The stop bit is the last set bit in the buffer; anything
   // before it is data, anything at/after it is trailing.

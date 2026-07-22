@@ -19,6 +19,8 @@ uint32_t SliceTypeMod5(uint32_t slice_type) { return slice_type % 5; }
 bool IsP(uint32_t t) { return t == 0; }
 bool IsB(uint32_t t) { return t == 1; }
 bool IsSp(uint32_t t) { return t == 3; }
+bool IsI(uint32_t t) { return t == 2; }
+bool IsSi(uint32_t t) { return t == 4; }
 
 // ref_pic_list_modification (spec 7.3.3.1). Reads entries until idc == 3.
 bool ParseRefPicListMod(BitReader* br, std::vector<RefPicListMod>* out) {
@@ -254,6 +256,52 @@ bool ParseSliceHeader(const uint8_t* rbsp, size_t size, uint32_t nal_ref_idc,
   if (nal_ref_idc != 0 && !ParseDecRefPicMarking(&br, idr, &sh)) {
     return false;
   }
+
+  // Remaining header syntax, parsed so that the recorded offset really is the
+  // start of slice data (spec 7.3.3).
+  uint32_t ue = 0;
+  if (ctx.entropy_coding_mode_flag && !IsI(type) && !IsSi(type) &&
+      !br.ReadUe(&ue)) {  // cabac_init_idc
+    return false;
+  }
+  if (!br.ReadSe(&sh.slice_qp_delta)) {
+    return false;
+  }
+  if (IsSp(type) || IsSi(type)) {
+    int32_t se = 0;
+    if ((IsSp(type) && !br.SkipBits(1)) ||  // sp_for_switch_flag
+        !br.ReadSe(&se)) {                  // slice_qs_delta
+      return false;
+    }
+  }
+  if (ctx.deblocking_filter_control_present_flag) {
+    uint32_t idc = 0;
+    if (!br.ReadUe(&idc)) {  // disable_deblocking_filter_idc
+      return false;
+    }
+    if (idc > 2) {
+      return false;
+    }
+    if (idc != 1) {
+      int32_t se = 0;
+      if (!br.ReadSe(&se) ||  // slice_alpha_c0_offset_div2
+          !br.ReadSe(&se)) {  // slice_beta_offset_div2
+        return false;
+      }
+    }
+  }
+  // slice_group_change_cycle follows for map types 3..5, and its width depends
+  // on PPS state this parser does not carry. Rather than report an offset that
+  // silently excludes it, refuse: no supported profile uses slice groups
+  // (constrained baseline prohibits them).
+  if (ctx.num_slice_groups_minus1 > 0) {
+    return false;
+  }
+
+  // Slice data begins here. CAVLC needs no alignment; for CABAC the consumer
+  // aligns to the next byte itself. Recorded in RBSP bit space -- convert with
+  // RbspToRawBitOffset() for a hardware slice_data_bit_offset.
+  sh.slice_data_bit_offset_rbsp = static_cast<uint32_t>(br.bit_pos());
 
   *out = sh;
   return true;

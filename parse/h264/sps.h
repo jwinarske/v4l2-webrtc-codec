@@ -22,10 +22,28 @@ struct Sps {
   bool frame_mbs_only_flag = true;
   uint32_t width = 0;   // cropped luma width in pixels
   uint32_t height = 0;  // cropped luma height in pixels
+
+  // Coded (uncropped) macroblock geometry, and the picture-order and reference
+  // fields a hardware decoder needs to build its picture parameters and to
+  // populate a SliceContext.
+  uint32_t pic_width_in_mbs = 0;         // pic_width_in_mbs_minus1 + 1
+  uint32_t pic_height_in_map_units = 0;  // pic_height_in_map_units_minus1 + 1
+  uint32_t log2_max_frame_num = 4;       // log2_max_frame_num_minus4 + 4
+  uint32_t pic_order_cnt_type = 0;
+  uint32_t log2_max_pic_order_cnt_lsb = 4;        // poc type 0; _minus4 + 4
+  bool delta_pic_order_always_zero_flag = false;  // poc type 1
+  uint32_t max_num_ref_frames = 0;
+  bool direct_8x8_inference_flag = false;
+  bool mb_adaptive_frame_field_flag = false;
+  bool separate_colour_plane_flag = false;
 };
 
 // Largest coded dimension accepted; anything larger is treated as malformed.
 inline constexpr uint32_t kMaxDimension = 16384;
+
+// Spec bound on log2_max_frame_num_minus4 and
+// log2_max_pic_order_cnt_lsb_minus4. Both size u(v) reads in the slice header.
+inline constexpr uint32_t kMaxLog2Minus4 = 12;
 
 // Parses an SPS from its RBSP (NAL header stripped, emulation-prevention bytes
 // already removed — e.g. Nal::rbsp). Returns true and fills *out on success,

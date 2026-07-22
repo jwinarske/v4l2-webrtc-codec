@@ -18,6 +18,19 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   size_t total = 0;
   for (const auto& nal : nals) {
     total += nal.rbsp.size();
+    // The RBSP is derived from the raw NAL by removing bytes, so it can never
+    // be longer, and any offset the conversion accepts must land inside raw.
+    if (nal.rbsp.size() + 1 > nal.raw.size()) {
+      __builtin_trap();
+    }
+    for (uint32_t bit :
+         {0u, 1u, 7u, 8u, static_cast<uint32_t>(nal.rbsp.size() * 8)}) {
+      uint32_t raw_bit = 0;
+      if (v4l2wc::h264::RbspToRawBitOffset(nal, bit, &raw_bit) &&
+          raw_bit > nal.raw.size() * 8) {
+        __builtin_trap();
+      }
+    }
   }
   return total == SIZE_MAX ? 1 : 0;
 }

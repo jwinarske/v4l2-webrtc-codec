@@ -28,6 +28,9 @@ struct SliceContext {
   bool separate_colour_plane_flag = false;
   uint32_t chroma_array_type = 1;  // 0 for monochrome / separate plane
   // From PPS.
+  bool entropy_coding_mode_flag = false;
+  bool deblocking_filter_control_present_flag = false;
+  uint32_t num_slice_groups_minus1 = 0;
   bool bottom_field_pic_order_in_frame_present_flag = false;
   uint32_t num_ref_idx_l0_default_active_minus1 = 0;
   uint32_t num_ref_idx_l1_default_active_minus1 = 0;
@@ -66,6 +69,11 @@ struct SliceHeader {
   bool long_term_reference_flag = false;            // IDR
   bool adaptive_ref_pic_marking_mode_flag = false;  // non-IDR
   std::vector<Mmco> mmco;
+  int32_t slice_qp_delta = 0;
+  // RBSP bit position just past the header, i.e. where slice data begins.
+  // Convert to raw-NAL bit space with RbspToRawBitOffset() to obtain
+  // slice_data_bit_offset for a hardware decoder.
+  uint32_t slice_data_bit_offset_rbsp = 0;
 };
 
 // Parses a slice header from its RBSP (NAL header stripped,

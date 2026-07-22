@@ -59,8 +59,8 @@ source_set("v4l2wc") {
     # only its headers are needed at build time and nothing links against it.
     # They come from the build sysroot (Debian bullseye ships libva 1.17 for
     # every target arch); a standalone host build needs libva-devel installed.
-    "src/va_h264_parse.cc",
-    "src/va_h264_parse.h",
+    "src/va_loader.cc",
+    "src/va_loader.h",
     "src/vaapi_h264_decoder.cc",
     "src/vaapi_h264_decoder.h",
   ]

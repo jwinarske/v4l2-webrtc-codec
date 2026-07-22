@@ -88,6 +88,7 @@ bool ParseSps(const uint8_t* rbsp, size_t size, Sps* out) {
     if (sps.chroma_format_idc == 3 && !br.ReadFlag(&separate_colour_plane)) {
       return false;
     }
+    sps.separate_colour_plane_flag = separate_colour_plane;
     uint32_t ignore = 0;
     if (!br.ReadUe(&ignore) ||  // bit_depth_luma_minus8
         !br.ReadUe(&ignore) ||  // bit_depth_chroma_minus8
@@ -113,21 +114,34 @@ bool ParseSps(const uint8_t* rbsp, size_t size, Sps* out) {
   }
 
   uint32_t ignore = 0;
-  if (!br.ReadUe(&ignore)) {  // log2_max_frame_num_minus4
+  uint32_t log2_max_frame_num_minus4 = 0;
+  if (!br.ReadUe(&log2_max_frame_num_minus4)) {
     return false;
   }
+  // Spec bound. This sizes a u(v) read in the slice header, so an unbounded
+  // value would drive an enormous bit-by-bit read there.
+  if (log2_max_frame_num_minus4 > kMaxLog2Minus4) {
+    return false;
+  }
+  sps.log2_max_frame_num = log2_max_frame_num_minus4 + 4;
   uint32_t pic_order_cnt_type = 0;
   if (!br.ReadUe(&pic_order_cnt_type)) {
     return false;
   }
+  sps.pic_order_cnt_type = pic_order_cnt_type;
   if (pic_order_cnt_type == 0) {
-    if (!br.ReadUe(&ignore)) {  // log2_max_pic_order_cnt_lsb_minus4
+    uint32_t log2_max_poc_lsb_minus4 = 0;
+    if (!br.ReadUe(&log2_max_poc_lsb_minus4)) {
       return false;
     }
+    if (log2_max_poc_lsb_minus4 > kMaxLog2Minus4) {  // sizes a u(v) read too
+      return false;
+    }
+    sps.log2_max_pic_order_cnt_lsb = log2_max_poc_lsb_minus4 + 4;
   } else if (pic_order_cnt_type == 1) {
     int32_t sig = 0;
     uint32_t num_ref = 0;
-    if (!br.SkipBits(1) ||       // delta_pic_order_always_zero_flag
+    if (!br.ReadFlag(&sps.delta_pic_order_always_zero_flag) ||
         !br.ReadSe(&sig) ||      // offset_for_non_ref_pic
         !br.ReadSe(&sig) ||      // offset_for_top_to_bottom_field
         !br.ReadUe(&num_ref)) {  // num_ref_frames_in_pic_order_cnt_cycle
@@ -147,7 +161,7 @@ bool ParseSps(const uint8_t* rbsp, size_t size, Sps* out) {
 
   uint32_t width_mbs_minus1 = 0;
   uint32_t height_map_units_minus1 = 0;
-  if (!br.ReadUe(&ignore) ||            // max_num_ref_frames
+  if (!br.ReadUe(&sps.max_num_ref_frames) ||
       !br.SkipBits(1) ||                // gaps_in_frame_num_value_allowed
       !br.ReadUe(&width_mbs_minus1) ||  // pic_width_in_mbs_minus1
       !br.ReadUe(&height_map_units_minus1)) {  // pic_height_in_map_units_minus1
@@ -156,10 +170,11 @@ bool ParseSps(const uint8_t* rbsp, size_t size, Sps* out) {
   if (!br.ReadFlag(&sps.frame_mbs_only_flag)) {
     return false;
   }
-  if (!sps.frame_mbs_only_flag && !br.SkipBits(1)) {  // mb_adaptive_frame_field
+  if (!sps.frame_mbs_only_flag &&
+      !br.ReadFlag(&sps.mb_adaptive_frame_field_flag)) {
     return false;
   }
-  if (!br.SkipBits(1)) {  // direct_8x8_inference_flag
+  if (!br.ReadFlag(&sps.direct_8x8_inference_flag)) {
     return false;
   }
 
@@ -168,6 +183,8 @@ bool ParseSps(const uint8_t* rbsp, size_t size, Sps* out) {
       height_map_units_minus1 >= kMaxDimension / 16) {
     return false;
   }
+  sps.pic_width_in_mbs = width_mbs_minus1 + 1;
+  sps.pic_height_in_map_units = height_map_units_minus1 + 1;
   uint32_t width = (width_mbs_minus1 + 1) * 16;
   uint32_t height = (2 - (sps.frame_mbs_only_flag ? 1u : 0u)) *
                     (height_map_units_minus1 + 1) * 16;
