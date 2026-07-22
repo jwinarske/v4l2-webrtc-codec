@@ -14,6 +14,8 @@
 namespace v4l2wc::h264 {
 
 struct Pps {
+  Pps();
+
   uint32_t pic_parameter_set_id = 0;
   uint32_t seq_parameter_set_id = 0;      // the SPS this PPS references
   bool entropy_coding_mode_flag = false;  // true = CABAC, false = CAVLC

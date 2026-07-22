@@ -4,6 +4,13 @@
 #include "parse/h264/nal.h"
 
 namespace v4l2wc::h264 {
+
+Nal::Nal() = default;
+Nal::~Nal() = default;
+Nal::Nal(const Nal&) = default;
+Nal& Nal::operator=(const Nal&) = default;
+Nal::Nal(Nal&&) noexcept = default;
+Nal& Nal::operator=(Nal&&) noexcept = default;
 namespace {
 
 // Removes emulation-prevention bytes: 0x03 in a `0x00 0x00 0x03` sequence

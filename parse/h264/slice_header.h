@@ -19,6 +19,8 @@ namespace v4l2wc::h264 {
 
 // Fields the slice header parse needs from the active SPS and PPS.
 struct SliceContext {
+  SliceContext();
+
   // From SPS.
   uint32_t log2_max_frame_num = 4;  // log2_max_frame_num_minus4 + 4
   uint32_t pic_order_cnt_type = 0;
@@ -51,6 +53,13 @@ struct Mmco {
 };
 
 struct SliceHeader {
+  SliceHeader();
+  ~SliceHeader();
+  SliceHeader(const SliceHeader&);
+  SliceHeader& operator=(const SliceHeader&);
+  SliceHeader(SliceHeader&&) noexcept;
+  SliceHeader& operator=(SliceHeader&&) noexcept;
+
   uint32_t first_mb_in_slice = 0;
   uint32_t slice_type = 0;  // 0..9; % 5 gives P/B/I/SP/SI
   uint32_t pic_parameter_set_id = 0;
