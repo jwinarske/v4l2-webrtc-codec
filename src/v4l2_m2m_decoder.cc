@@ -184,6 +184,8 @@ std::unique_ptr<V4l2M2mDecoder> V4l2M2mDecoder::Create(
   return dec;
 }
 
+V4l2M2mDecoder::V4l2M2mDecoder() = default;
+
 V4l2M2mDecoder::~V4l2M2mDecoder() {
   if (fd_ < 0) {
     return;

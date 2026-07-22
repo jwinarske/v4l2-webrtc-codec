@@ -21,6 +21,10 @@
 #include "c/lw_video_sink.h"
 #include "src/internal/lw_native_video_frame_buffer.h"
 
+// The two decode engines behind IDmaDecoder (V4L2 M2M, VAAPI).
+#include "src/v4l2_m2m_decoder.h"
+#include "src/vaapi_h264_decoder.h"
+
 // Bitstream sizing (SPS -> coded dimensions) uses the pure-logic parse layer.
 #include "parse/h264/nal.h"
 #include "parse/h264/sps.h"
@@ -49,6 +53,10 @@ void ReleaseFrame(void* ctx) {
 }
 
 }  // namespace
+
+SourceHolder::SourceHolder(std::unique_ptr<IDmaDecoder> dec)
+    : dec_(std::move(dec)) {}
+SourceHolder::~SourceHolder() = default;
 
 V4l2Decoder::V4l2Decoder(V4l2WcConfig config) : config_(config) {}
 V4l2Decoder::~V4l2Decoder() = default;
@@ -92,20 +100,31 @@ bool V4l2Decoder::EnsureSource(const uint8_t* data, size_t size) {
   const std::size_t output_buffer_size = std::max<std::size_t>(
       static_cast<std::size_t>(sps.width) * sps.height, std::size_t{1} << 20);
 
-  // Linear NV12: the software floor (SHM) reads it correctly and is tear-free.
-  // (SAND-tiled NV12_COL128 is the zero-copy direct-scanout format, but the vc4
-  // registry is not granting a DRM plane for it here; see V4l2M2mDecoder.)
-  auto dec = V4l2M2mDecoder::Create(
+  // Prefer the V4L2 M2M stateful decoder (the Pi path). Linear NV12: the
+  // software floor (SHM) reads it correctly and is tear-free.
+  std::unique_ptr<IDmaDecoder> dec = V4l2M2mDecoder::Create(
       path, V4L2_PIX_FMT_H264, V4L2_PIX_FMT_NV12, sps.width, sps.height,
       /*output_buffer_count=*/4,
       /*capture_buffer_count=*/16, output_buffer_size);
+  if (dec) {
+    RTC_LOG(LS_INFO) << "v4l2wc: V4L2 M2M decoder on " << path << " "
+                     << sps.width << "x" << sps.height;
+  } else {
+    // No V4L2 M2M device (e.g. an amdgpu host / Steam Deck): fall back to the
+    // VAAPI engine, which decodes to an NV12 dma-buf via libva (dlopen'd). The
+    // pool covers the max H.264 DPB (16) plus frames in flight to the
+    // compositor; the engine re-reads the SPS to size its own state.
+    dec = VaapiH264Decoder::Create("/dev/dri/renderD128", /*pool_size=*/28);
+    if (dec) {
+      RTC_LOG(LS_INFO) << "v4l2wc: VAAPI decoder " << sps.width << "x"
+                       << sps.height;
+    }
+  }
   if (!dec) {
-    RTC_LOG(LS_ERROR) << "v4l2wc: V4l2M2mDecoder::Create failed on " << path
-                      << " (" << sps.width << "x" << sps.height << ")";
+    RTC_LOG(LS_ERROR) << "v4l2wc: no decode backend (V4L2 " << path
+                      << " and VAAPI both unavailable)";
     return false;
   }
-  RTC_LOG(LS_INFO) << "v4l2wc: decoder created on " << path << " " << sps.width
-                   << "x" << sps.height;
   ++pool_generation_;
   holder_ = std::make_shared<SourceHolder>(std::move(dec));
   return true;
