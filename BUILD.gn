@@ -56,7 +56,9 @@ source_set("v4l2wc") {
     "src/v4l2_m2m_decoder.h",
     "src/v4l2wc_factory.cc",
     # VAAPI engine (amdgpu/Steam Deck). libva is loaded at runtime (dlopen), so
-    # only the vendored headers are needed at build time -- no libva link.
+    # only its headers are needed at build time and nothing links against it.
+    # They come from the build sysroot (Debian bullseye ships libva 1.17 for
+    # every target arch); a standalone host build needs libva-devel installed.
     "src/va_h264_parse.cc",
     "src/va_h264_parse.h",
     "src/vaapi_h264_decoder.cc",
@@ -66,10 +68,7 @@ source_set("v4l2wc") {
   # symbol_visibility_hidden is already in the default config set; only the
   # decoder's own C entry points are exported by the absorbing libwebrtc.so.
   configs += [ ":v4l2wc_private_config" ]
-  include_dirs = [
-    ".",             # for "parse/..." and "src/..." includes
-    "third_party/va",  # vendored libva headers (compile-time only; dlopen'd)
-  ]
+  include_dirs = [ "." ]  # for "parse/..." and "src/..." includes
 
   deps = [
     "//api:make_ref_counted",

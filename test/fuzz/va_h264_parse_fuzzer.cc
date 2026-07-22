@@ -5,10 +5,11 @@
 // bitstream front end, which sees attacker-controlled data after the DTLS
 // handshake. Feeds arbitrary bytes as an Annex-B stream, splits it into NALs,
 // and parses each as SPS / PPS / slice header, relying on the bounds-check
-// invariants (verified under ASan/UBSan). Build:
+// invariants (verified under ASan/UBSan). Needs libva-devel for <va/va.h>.
+// Build:
 //   clang++ -std=c++17 -g -O1 -fsanitize=fuzzer,address,undefined -I. \
-//       -Ithird_party/va src/va_h264_parse.cc \
-//       test/fuzz/va_h264_parse_fuzzer.cc -o va_h264_parse_fuzzer
+//       src/va_h264_parse.cc test/fuzz/va_h264_parse_fuzzer.cc \
+//       -o va_h264_parse_fuzzer
 
 #include <cstddef>
 #include <cstdint>
