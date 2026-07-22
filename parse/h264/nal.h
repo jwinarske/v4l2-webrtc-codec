@@ -40,7 +40,19 @@ struct Nal {
   // RBSP: the NAL payload (after the 1-byte header) with emulation-prevention
   // bytes removed. Owned; safe to read start..start+size().
   std::vector<uint8_t> rbsp;
+  // The NAL exactly as it appeared in the stream: header byte plus payload,
+  // start code excluded, emulation-prevention bytes intact. Hardware decoders
+  // submit this buffer and address into it in raw bit space.
+  std::vector<uint8_t> raw;
 };
+
+// Converts a bit offset within `nal.rbsp` to the corresponding bit offset
+// within `nal.raw`, accounting for the 1-byte NAL header and any
+// emulation-prevention bytes removed before that point. This is what a VA-API
+// or stateless decoder needs for slice_data_bit_offset. Returns false if the
+// result would fall outside `nal.raw`.
+bool RbspToRawBitOffset(const Nal& nal, uint32_t rbsp_bit_offset,
+                        uint32_t* raw_bit_offset);
 
 // Splits an Annex-B byte stream into NAL units. Start codes are 0x000001 or
 // 0x00000001; the leading bytes before the first start code are ignored. Each

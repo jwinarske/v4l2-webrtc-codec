@@ -19,8 +19,12 @@
 #include <memory>
 #include <vector>
 
+#include "parse/h264/nal.h"
+#include "parse/h264/pps.h"
+#include "parse/h264/slice_header.h"
+#include "parse/h264/sps.h"
 #include "src/dma_decoder.h"  // V4l2DmaFrame, SubmitResult, IDmaDecoder
-#include "src/va_h264_parse.h"
+#include "src/va_loader.h"
 
 namespace v4l2wc {
 
@@ -60,9 +64,9 @@ class VaapiH264Decoder : public IDmaDecoder {
 
  private:
   VaapiH264Decoder();
-  bool EnsureConfigured(const va::Sps& sps);
-  bool DecodeSlice(const va::Nal& nal);
-  int ComputePoc(const va::SliceHdr& sh, int ref_idc);
+  bool EnsureConfigured(const h264::Sps& sps);
+  bool DecodeSlice(const h264::Nal& nal);
+  int ComputePoc(const h264::SliceHeader& sh, int ref_idc);
   int PickFreeSlot();
   void ExportSlot(std::uint32_t slot, std::uint64_t rtp);
 
@@ -101,8 +105,8 @@ class VaapiH264Decoder : public IDmaDecoder {
   std::uint32_t coded_w_ = 0, coded_h_ = 0;
   std::uint32_t pool_size_ = 0;
 
-  va::Sps sps_{};
-  va::Pps pps_{};
+  h264::Sps sps_{};
+  h264::Pps pps_{};
   bool have_sps_ = false, have_pps_ = false;
 
   std::vector<Slot> slots_;

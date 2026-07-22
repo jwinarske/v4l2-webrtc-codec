@@ -29,9 +29,11 @@ int main() {
 
   // IDR I-slice header (nal_ref_idc=3), hand-encoded and bit-verified:
   // first_mb=0, slice_type=7 (I), pps_id=0, frame_num=0 (4 bits), idr_pic_id=0,
-  // pic_order_cnt_lsb=0 (4 bits), dec_ref: no_output=0, long_term_ref=0.
+  // pic_order_cnt_lsb=0 (4 bits), dec_ref: no_output=0, long_term_ref=0,
+  // then slice_qp_delta=0 (a single '1' bit at position 20). Slice data
+  // therefore begins at bit 21.
   {
-    const std::vector<uint8_t> rbsp = {0x88, 0x84, 0x00};
+    const std::vector<uint8_t> rbsp = {0x88, 0x84, 0x08};
     SliceHeader sh;
     CHECK(ParseSliceHeader(rbsp.data(), rbsp.size(), 3, true, ctx, &sh));
     CHECK(sh.first_mb_in_slice == 0);
@@ -45,6 +47,8 @@ int main() {
     CHECK(sh.mmco.empty());
     CHECK(!sh.no_output_of_prior_pics_flag);
     CHECK(!sh.long_term_reference_flag);
+    CHECK(sh.slice_qp_delta == 0);
+    CHECK(sh.slice_data_bit_offset_rbsp == 21);
   }
 
   // Malformed / truncated input must fail cleanly, never crash.

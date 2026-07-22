@@ -22,6 +22,18 @@ struct Pps {
   int32_t pic_init_qp_minus26 = 0;
   bool deblocking_filter_control_present_flag = false;
   bool transform_8x8_mode_flag = false;
+
+  // Additional fields a hardware decoder needs for its picture parameters and
+  // to populate a SliceContext.
+  uint32_t num_slice_groups_minus1 = 0;
+  bool bottom_field_pic_order_in_frame_present_flag = false;
+  bool weighted_pred_flag = false;
+  uint32_t weighted_bipred_idc = 0;
+  bool constrained_intra_pred_flag = false;
+  bool redundant_pic_cnt_present_flag = false;
+  int32_t chroma_qp_index_offset = 0;
+  // Defaults to chroma_qp_index_offset when the optional extension is absent.
+  int32_t second_chroma_qp_index_offset = 0;
 };
 
 // Parses a PPS from its RBSP (NAL header stripped, emulation-prevention bytes

@@ -30,7 +30,13 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
   const bool idr = (data[1] & 0x01) != 0;
   v4l2wc::h264::SliceHeader sh;
-  v4l2wc::h264::ParseSliceHeader(data + 2, size - 2, /*nal_ref_idc=*/3, idr,
-                                 ctx, &sh);
+  if (v4l2wc::h264::ParseSliceHeader(data + 2, size - 2, /*nal_ref_idc=*/3, idr,
+                                     ctx, &sh)) {
+    // On success the reported slice-data offset must lie within the RBSP it
+    // was parsed from; a hardware decoder hands this to the device.
+    if (sh.slice_data_bit_offset_rbsp > (size - 2) * 8) {
+      __builtin_trap();
+    }
+  }
   return 0;
 }

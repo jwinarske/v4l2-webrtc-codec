@@ -104,7 +104,7 @@ bool ParsePps(const uint8_t* rbsp, size_t size, Pps* out) {
   if (!br.ReadUe(&pps.pic_parameter_set_id) ||
       !br.ReadUe(&pps.seq_parameter_set_id) ||
       !br.ReadFlag(&pps.entropy_coding_mode_flag) ||
-      !br.SkipBits(1)) {  // bottom_field_pic_order_in_frame_present_flag
+      !br.ReadFlag(&pps.bottom_field_pic_order_in_frame_present_flag)) {
     return false;
   }
 
@@ -112,6 +112,7 @@ bool ParsePps(const uint8_t* rbsp, size_t size, Pps* out) {
   if (!br.ReadUe(&num_slice_groups_minus1)) {
     return false;
   }
+  pps.num_slice_groups_minus1 = num_slice_groups_minus1;
   if (num_slice_groups_minus1 > kMaxSliceGroupsMinus1) {
     return false;
   }
@@ -121,19 +122,21 @@ bool ParsePps(const uint8_t* rbsp, size_t size, Pps* out) {
   }
 
   int32_t se = 0;
-  uint32_t bipred = 0;
   if (!br.ReadUe(&pps.num_ref_idx_l0_default_active_minus1) ||
       !br.ReadUe(&pps.num_ref_idx_l1_default_active_minus1) ||
-      !br.SkipBits(1) ||           // weighted_pred_flag
-      !br.ReadBits(2, &bipred) ||  // weighted_bipred_idc
+      !br.ReadFlag(&pps.weighted_pred_flag) ||
+      !br.ReadBits(2, &pps.weighted_bipred_idc) ||
       !br.ReadSe(&pps.pic_init_qp_minus26) ||
       !br.ReadSe(&se) ||  // pic_init_qs_minus26
-      !br.ReadSe(&se) ||  // chroma_qp_index_offset
+      !br.ReadSe(&pps.chroma_qp_index_offset) ||
       !br.ReadFlag(&pps.deblocking_filter_control_present_flag) ||
-      !br.SkipBits(1) ||  // constrained_intra_pred_flag
-      !br.SkipBits(1)) {  // redundant_pic_cnt_present_flag
+      !br.ReadFlag(&pps.constrained_intra_pred_flag) ||
+      !br.ReadFlag(&pps.redundant_pic_cnt_present_flag)) {
     return false;
   }
+  // Absent the optional extension, second_chroma_qp_index_offset equals
+  // chroma_qp_index_offset (spec 7.4.2.2).
+  pps.second_chroma_qp_index_offset = pps.chroma_qp_index_offset;
 
   // Optional extension (only present if RBSP data remains before the stop bit).
   if (br.MoreRbspData()) {
@@ -156,7 +159,7 @@ bool ParsePps(const uint8_t* rbsp, size_t size, Pps* out) {
         }
       }
     }
-    if (!br.ReadSe(&se)) {  // second_chroma_qp_index_offset
+    if (!br.ReadSe(&pps.second_chroma_qp_index_offset)) {
       return false;
     }
   }
