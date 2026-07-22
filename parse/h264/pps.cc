@@ -6,6 +6,8 @@
 #include "parse/bit_reader.h"
 
 namespace v4l2wc::h264 {
+
+Pps::Pps() = default;
 namespace {
 
 // Spec caps: a picture has at most 8 slice groups, and a sane upper bound on

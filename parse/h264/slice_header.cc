@@ -6,6 +6,15 @@
 #include "parse/bit_reader.h"
 
 namespace v4l2wc::h264 {
+
+SliceContext::SliceContext() = default;
+
+SliceHeader::SliceHeader() = default;
+SliceHeader::~SliceHeader() = default;
+SliceHeader::SliceHeader(const SliceHeader&) = default;
+SliceHeader& SliceHeader::operator=(const SliceHeader&) = default;
+SliceHeader::SliceHeader(SliceHeader&&) noexcept = default;
+SliceHeader& SliceHeader::operator=(SliceHeader&&) noexcept = default;
 namespace {
 
 // Bounds on the attacker-controlled variable-length structures. Real slices

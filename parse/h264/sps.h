@@ -15,6 +15,8 @@
 namespace v4l2wc::h264 {
 
 struct Sps {
+  Sps();
+
   uint8_t profile_idc = 0;
   uint8_t level_idc = 0;
   uint32_t seq_parameter_set_id = 0;

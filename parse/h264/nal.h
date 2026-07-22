@@ -35,6 +35,16 @@ enum class NalUnitType : uint8_t {
 };
 
 struct Nal {
+  Nal();
+  ~Nal();
+  Nal(const Nal&);
+  Nal& operator=(const Nal&);
+  // Declared alongside the destructor, which would otherwise suppress them:
+  // NALs are moved into the parse result, and deep-copying two buffers per NAL
+  // instead would be a silent regression.
+  Nal(Nal&&) noexcept;
+  Nal& operator=(Nal&&) noexcept;
+
   NalUnitType type = NalUnitType::kUnspecified;
   uint8_t nal_ref_idc = 0;  // 0..3
   // RBSP: the NAL payload (after the 1-byte header) with emulation-prevention

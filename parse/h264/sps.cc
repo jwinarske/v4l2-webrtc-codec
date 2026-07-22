@@ -6,6 +6,8 @@
 #include "parse/bit_reader.h"
 
 namespace v4l2wc::h264 {
+
+Sps::Sps() = default;
 namespace {
 
 bool IsHighProfile(uint8_t profile_idc) {
@@ -113,7 +115,6 @@ bool ParseSps(const uint8_t* rbsp, size_t size, Sps* out) {
     }
   }
 
-  uint32_t ignore = 0;
   uint32_t log2_max_frame_num_minus4 = 0;
   if (!br.ReadUe(&log2_max_frame_num_minus4)) {
     return false;
