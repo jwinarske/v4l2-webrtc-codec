@@ -335,6 +335,14 @@ SubmitResult VaapiH264Decoder::SubmitBitstream(const std::uint8_t* data,
 
 void VaapiH264Decoder::ExportSlot(std::uint32_t slot, std::uint64_t rtp) {
   Slot& s = slots_[slot];
+  s.rtp = rtp;
+  // Export once and keep the fd for the pool's lifetime, the way the V4L2
+  // engine hands out its VIDIOC_EXPBUF fds. Consumers cache dma-buf imports
+  // keyed on the fd, so re-exporting per frame would recycle fd numbers across
+  // surfaces and alias those caches. The destructor closes them.
+  if (s.fd >= 0) {
+    return;
+  }
   VADRMPRIMESurfaceDescriptor d{};
   VAStatus st = va_.ExportSurfaceHandle(
       dpy_, s.surface, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
@@ -386,10 +394,8 @@ bool VaapiH264Decoder::Acquire(V4l2DmaFrame* out) {
 void VaapiH264Decoder::Release(std::uint32_t slot) {
   if (slot >= slots_.size()) return;
   Slot& s = slots_[slot];
-  if (s.fd >= 0) {
-    ::close(s.fd);
-    s.fd = -1;
-  }
+  // The exported fd deliberately stays open for the pool's lifetime (see
+  // ExportSlot); only the check-out is returned here.
   s.checked_out = false;
   // The surface frees for reuse once it is also no longer a reference (handled
   // by DPB eviction clearing is_reference).
