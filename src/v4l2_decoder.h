@@ -22,27 +22,27 @@
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/video_codecs/video_decoder.h"
 #include "api/video_codecs/video_decoder_factory.h"
-#include "src/v4l2_m2m_decoder.h"
+#include "src/dma_decoder.h"  // IDmaDecoder (V4L2 M2M or VAAPI)
 #include "v4l2wc/v4l2wc.h"
 
 namespace v4l2wc {
 
-// Serialized access to the V4L2 decoder. A decoded frame's release callback can
-// fire on the presenter thread while Decode() runs on the webrtc decoder
-// thread, so every decoder call goes through this holder's mutex, and in-flight
-// frames keep it alive (shared_ptr) past decoder Release().
+// Serialized access to the decode engine. A decoded frame's release callback
+// can fire on the presenter thread while Decode() runs on the webrtc decoder
+// thread, so every engine call goes through this holder's mutex, and in-flight
+// frames keep it alive (shared_ptr) past decoder Release(). The engine is
+// either V4l2M2mDecoder (Pi) or VaapiH264Decoder (AMD), behind IDmaDecoder.
 class SourceHolder {
  public:
-  explicit SourceHolder(std::unique_ptr<V4l2M2mDecoder> dec)
-      : dec_(std::move(dec)) {}
-  ~SourceHolder() = default;
+  explicit SourceHolder(std::unique_ptr<IDmaDecoder> dec);
+  ~SourceHolder();
 
   std::mutex& mutex() { return m_; }
-  V4l2M2mDecoder* dec() { return dec_.get(); }
+  IDmaDecoder* dec() { return dec_.get(); }
 
  private:
   std::mutex m_;
-  std::unique_ptr<V4l2M2mDecoder> dec_;
+  std::unique_ptr<IDmaDecoder> dec_;
 };
 
 class V4l2Decoder : public webrtc::VideoDecoder {
