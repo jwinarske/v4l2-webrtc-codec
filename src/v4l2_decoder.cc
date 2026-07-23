@@ -136,11 +136,16 @@ void V4l2Decoder::DeliverReadyFrames() {
   }
   for (;;) {
     V4l2DmaFrame f;
+    std::uint32_t pool_size = 0;
     {
       std::lock_guard<std::mutex> lock(holder_->mutex());
       if (!holder_->dec()->Acquire(&f)) {
         break;  // nothing ready
       }
+      // Read under the same lock as the acquire: a reconfiguration reallocates
+      // the pool, and a size from the other side of that would not describe
+      // the buffer just acquired.
+      pool_size = holder_->dec()->PoolSize();
     }
 
     // V4L2 copies the OUTPUT buffer timestamp onto the matching CAPTURE buffer,
@@ -176,6 +181,7 @@ void V4l2Decoder::DeliverReadyFrames() {
         static_cast<int64_t>(rtp_timestamp) * 1000000 / 90000;
     desc.frame_seq = frame_seq_++;
     desc.pool_generation = pool_generation_;
+    desc.pool_size = pool_size;
 
     RTC_LOG(LS_INFO) << "v4l2wc: delivering native frame " << f.width << "x"
                      << f.height << " fourcc=" << f.drm_fourcc

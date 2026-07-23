@@ -62,6 +62,11 @@ class V4l2M2mDecoder : public IDmaDecoder {
 
   // Re-queues a previously acquired CAPTURE buffer for reuse.
   void Release(std::uint32_t capture_index) override;
+  // The pool exists only after the CAPTURE queue is set up, so this reports
+  // what was actually allocated rather than what was asked for.
+  std::uint32_t PoolSize() const override {
+    return static_cast<std::uint32_t>(capture_buffers_.size());
+  }
 
  private:
   V4l2M2mDecoder();

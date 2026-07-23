@@ -57,6 +57,12 @@ class IDmaDecoder {
   virtual bool Acquire(V4l2DmaFrame* out) = 0;
   // Return a previously acquired frame's capture slot for reuse.
   virtual void Release(std::uint32_t capture_index) = 0;
+
+  // How many buffers the engine decodes into, or 0 before the pool exists.
+  // Passed on to consumers so they can bound what they hold: a consumer that
+  // holds a large fraction of the pool starves the decoder waiting for a
+  // buffer, and the two engines' pools differ by an order of magnitude.
+  virtual std::uint32_t PoolSize() const = 0;
 };
 
 }  // namespace v4l2wc

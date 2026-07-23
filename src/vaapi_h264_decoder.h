@@ -61,6 +61,7 @@ class VaapiH264Decoder : public IDmaDecoder {
   // dma-buf fd and frees the surface for reuse (unless it is still a
   // reference).
   void Release(std::uint32_t slot) override;
+  std::uint32_t PoolSize() const override { return pool_size_; }
 
  private:
   VaapiH264Decoder();
