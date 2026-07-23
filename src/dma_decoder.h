@@ -36,6 +36,16 @@ struct V4l2DmaFrame {
   std::uint64_t rtp_timestamp = 0;  // opaque passthrough token (frame RTP ts)
 };
 
+// What a Drive() pass found. A resolution change is not an error: the stream
+// is fine, the decoder is simply configured for the wrong geometry and has to
+// be rebuilt, which the caller does. Reporting both as false left the caller
+// unable to tell a recoverable reconfiguration from a dead device.
+enum class DriveResult {
+  kOk,            // nothing to report
+  kSourceChange,  // mid-stream format change; recreate the decoder
+  kError,         // fatal
+};
+
 enum class SubmitResult {
   kOk,            // queued
   kTryAgain,      // no free OUTPUT buffer; Drive() then retry
@@ -51,8 +61,8 @@ class IDmaDecoder {
   virtual SubmitResult SubmitBitstream(const std::uint8_t* data,
                                        std::size_t size,
                                        std::uint64_t rtp_timestamp) = 0;
-  // Pump without blocking; false on a fatal error / mid-stream SOURCE_CHANGE.
-  virtual bool Drive() = 0;
+  // Pump without blocking.
+  virtual DriveResult Drive() = 0;
   // Hand out the newest ready frame as borrowed dma-buf fds; false if none.
   virtual bool Acquire(V4l2DmaFrame* out) = 0;
   // Return a previously acquired frame's capture slot for reuse.

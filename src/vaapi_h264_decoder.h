@@ -50,7 +50,7 @@ class VaapiH264Decoder : public IDmaDecoder {
                                std::uint64_t rtp_timestamp) override;
 
   // VAAPI decodes synchronously, so there is nothing to pump; always true.
-  bool Drive() override;
+  DriveResult Drive() override;
 
   // Hands out the parked decoded frame as borrowed dma-buf fds (exported via
   // vaExportSurfaceHandle). capture_index is the surface slot, returned via
