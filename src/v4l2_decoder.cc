@@ -228,6 +228,12 @@ int32_t V4l2Decoder::Decode(const webrtc::EncodedImage& input_image,
     if (s == SubmitResult::kOk) {
       break;
     }
+    if (s == SubmitResult::kSourceChange) {
+      // The engine recognised a stream that no longer matches the decoder it
+      // built. Same handling as a format change reported by Drive: rebuild
+      // rather than fail, since the stream is fine.
+      return Reconfigure(DriveResult::kSourceChange);
+    }
     if (s != SubmitResult::kTryAgain) {
       RTC_LOG(LS_ERROR) << "v4l2wc: submit failed (" << static_cast<int>(s)
                         << ")";
