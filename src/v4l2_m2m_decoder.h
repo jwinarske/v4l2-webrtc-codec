@@ -53,7 +53,7 @@ class V4l2M2mDecoder : public IDmaDecoder {
   // OUTPUT buffers, sets up CAPTURE on the first SOURCE_CHANGE, and parks the
   // newest decoded CAPTURE buffer (latest-wins). Returns false on a fatal
   // error or a mid-stream SOURCE_CHANGE (caller recreates the decoder).
-  bool Drive() override;
+  DriveResult Drive() override;
 
   // Returns the newest ready CAPTURE frame, if any, transferring the caller a
   // borrowed reference that must be returned with Release(). Returns false when

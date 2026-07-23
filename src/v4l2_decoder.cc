@@ -75,6 +75,11 @@ bool V4l2Decoder::EnsureSource(const uint8_t* data, size_t size) {
   if (holder_) {
     return true;
   }
+  // Dropping the previous holder does not free the decoder while frames are
+  // still out: each in-flight frame holds a shared reference, so the dmabuf
+  // fds its descriptor borrows stay valid until it is released. The new pool
+  // gets a new generation, which is how a consumer knows not to carry an
+  // import cache across.
   // Find coded dimensions from the first SPS.
   auto nals = h264::ParseAnnexB(data, size);
   h264::Sps sps;
@@ -228,19 +233,41 @@ int32_t V4l2Decoder::Decode(const webrtc::EncodedImage& input_image,
                         << ")";
       return WEBRTC_VIDEO_CODEC_ERROR;
     }
-    if (!dec->Drive()) {  // reclaim OUTPUT buffers, then retry
-      return WEBRTC_VIDEO_CODEC_ERROR;
+    const DriveResult d = dec->Drive();  // reclaim OUTPUT buffers, then retry
+    if (d != DriveResult::kOk) {
+      return Reconfigure(d);
     }
   }
 
+  DriveResult drive = DriveResult::kOk;
   {
     std::lock_guard<std::mutex> lock(holder_->mutex());
-    if (!holder_->dec()->Drive()) {
-      return WEBRTC_VIDEO_CODEC_ERROR;
-    }
+    drive = holder_->dec()->Drive();
+  }
+  if (drive != DriveResult::kOk) {
+    // Deliver whatever the old pool already produced before dropping it.
+    DeliverReadyFrames();
+    return Reconfigure(drive);
   }
   DeliverReadyFrames();
   return WEBRTC_VIDEO_CODEC_OK;
+}
+
+int32_t V4l2Decoder::Reconfigure(DriveResult reason) {
+  if (reason != DriveResult::kSourceChange) {
+    RTC_LOG(LS_ERROR) << "v4l2wc: decoder failed";
+    return WEBRTC_VIDEO_CODEC_ERROR;
+  }
+  // The stream is fine; this decoder is configured for the wrong geometry.
+  // Drop it and rebuild from the next keyframe's SPS, which is what carries
+  // the new dimensions. Frames already handed out keep the old decoder alive
+  // through their release contexts.
+  RTC_LOG(LS_INFO) << "v4l2wc: rebuilding the decoder for the new format";
+  holder_.reset();
+  render_time_by_rtp_.clear();
+  // Asking for a keyframe rather than an error: the caller should send one,
+  // and the next SubmitBitstream will carry the SPS the rebuild needs.
+  return WEBRTC_VIDEO_CODEC_ERROR;
 }
 
 int32_t V4l2Decoder::Release() {

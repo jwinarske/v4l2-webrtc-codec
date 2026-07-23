@@ -392,7 +392,7 @@ void V4l2M2mDecoder::TeardownCapture() {
   }
 }
 
-bool V4l2M2mDecoder::Drive() {
+DriveResult V4l2M2mDecoder::Drive() {
   // bcm2835-codec only surfaces V4L2 events (SOURCE_CHANGE) and buffer
   // completions through poll(); a bare DQEVENT/DQBUF spin never sees them. A
   // short poll lets the driver deliver without stalling the decode thread --
@@ -412,12 +412,12 @@ bool V4l2M2mDecoder::Drive() {
         (ev.u.src_change.changes & V4L2_EVENT_SRC_CH_RESOLUTION)) {
       if (!capture_streaming_) {
         if (!SetupCapture()) {
-          return false;
+          return DriveResult::kError;
         }
       } else {
         // Mid-stream resolution change: the caller recreates the decoder.
         RTC_LOG(LS_INFO) << "v4l2wc: mid-stream SOURCE_CHANGE; recreate";
-        return false;
+        return DriveResult::kSourceChange;
       }
     }
   }
@@ -470,7 +470,7 @@ bool V4l2M2mDecoder::Drive() {
           static_cast<std::uint64_t>(buf.timestamp.tv_usec);
     }
   }
-  return true;
+  return DriveResult::kOk;
 }
 
 bool V4l2M2mDecoder::Acquire(V4l2DmaFrame* out) {

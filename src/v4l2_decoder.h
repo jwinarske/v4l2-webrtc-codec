@@ -60,6 +60,9 @@ class V4l2Decoder : public webrtc::VideoDecoder {
  private:
   // Lazily create the source once the first SPS gives us coded dimensions.
   bool EnsureSource(const uint8_t* data, size_t size);
+  // Handle a Drive() that did not return kOk: a format change drops the
+  // decoder so the next keyframe rebuilds it; anything else is fatal.
+  int32_t Reconfigure(DriveResult reason);
   // Drain any ready CAPTURE buffers and deliver them to `callback_`. Each frame
   // carries its own recovered RTP timestamp (V4L2 OUTPUT->CAPTURE passthrough),
   // so a pipelined decoder pairs the frame that popped out with the render time

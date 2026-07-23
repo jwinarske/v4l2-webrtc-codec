@@ -53,7 +53,8 @@ VaapiH264Decoder::Slot& VaapiH264Decoder::Slot::operator=(const Slot&) =
     default;
 
 // VAAPI decodes synchronously, so there is nothing to pump.
-bool VaapiH264Decoder::Drive() { return true; }
+// Nothing to pump: libva decodes synchronously in SubmitBitstream.
+DriveResult VaapiH264Decoder::Drive() { return DriveResult::kOk; }
 
 VaapiH264Decoder::~VaapiH264Decoder() {
   for (auto& sl : slots_)
