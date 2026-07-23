@@ -353,8 +353,16 @@ SubmitResult VaapiH264Decoder::SubmitBitstream(const std::uint8_t* data,
     if (n.type == h264::NalUnitType::kSps) {
       h264::Sps s{};
       if (h264::ParseSps(n.rbsp.data(), n.rbsp.size(), &s)) {
-        if (configured_ && (s.pic_width_in_mbs * 16 != coded_w_))
+        // Height as well as width: a stream that keeps its width and changes
+        // aspect would otherwise decode into surfaces of the wrong size.
+        const std::uint32_t w = s.pic_width_in_mbs * 16;
+        const std::uint32_t h =
+            s.pic_height_in_map_units * 16 * (s.frame_mbs_only_flag ? 1 : 2);
+        if (configured_ && (w != coded_w_ || h != coded_h_)) {
+          RTC_LOG(LS_INFO) << "vaapi: stream changed to " << w << "x" << h
+                           << " from " << coded_w_ << "x" << coded_h_;
           return SubmitResult::kSourceChange;
+        }
         sps_ = s;
         have_sps_ = true;
       }
