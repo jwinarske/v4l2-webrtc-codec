@@ -63,14 +63,40 @@ may coexist during the transition. Dtor -> re-QBUF.
 
 The bitstream is attacker-controlled and reachable after the DTLS handshake.
 Every `dpb[]` / ref-list / slice index is bounds-checked as a **stated
-invariant, not an assert**. Mandatory CI:
+invariant, not an assert**.
 
-- **visl** — draw-the-controls correctness oracle (stateless).
-- **vicodec** — stateful-backend CI oracle: SOURCE_CHANGE choreography,
-  CAPTURE setup sequencing, drain/EOS, timestamp round-trip.
-- **fuzz gate** — libFuzzer over `parse/` (per-NAL corpus) and the DPB
-  tracker (malicious `decode_params` sequences). visl is a correctness
-  oracle, not a memory-safety one.
+What runs today, off-target, with no V4L2 device and no webrtc:
+
+```sh
+cmake -S . -B build -DCMAKE_CXX_COMPILER=clang++ && cmake --build build
+ctest --test-dir build
+```
+
+- **unit tests** over `parse/h264` — the shapes each parser must reject.
+- **fuzz gate** — libFuzzer over each parser, under AddressSanitizer and
+  UndefinedBehaviorSanitizer. Ten seconds per target by default, enough for a
+  regression to surface in an ordinary run. To hunt rather than gate:
+
+  ```sh
+  cmake -S . -B build -DV4L2WC_FUZZ_SECONDS=900 ...
+  ctest --test-dir build -R fuzz
+  ```
+
+  It found six defects in the H.264 parsers when it was first run by hand,
+  which is why it is wired into `ctest` rather than left as loose sources.
+  Built only when the compiler can produce libFuzzer binaries; the unit tests
+  build with any compiler.
+
+Not yet, despite the directories existing:
+
+- **visl** — a draw-the-controls correctness oracle (stateless). `test/visl/`
+  is empty.
+- **vicodec** — a stateful-backend oracle for SOURCE_CHANGE choreography,
+  CAPTURE setup sequencing, drain/EOS and timestamp round-trip.
+  `test/vicodec/` is empty.
+
+Neither is a memory-safety oracle in any case; that is what the fuzz gate is
+for. There is no CI running any of this yet.
 
 ## Layout
 
@@ -78,9 +104,10 @@ invariant, not an assert**. Mandatory CI:
 include/v4l2wc/v4l2wc.h   public C entry point + V4l2WcConfig
 src/                      factory, decoder, V4L2 request-API plumbing
 parse/                    bitstream parsers (h264, h265) — fuzz targets
-test/visl/                stateless CI harness
-test/vicodec/             stateful CI harness
-test/fuzz/                libFuzzer harnesses
+test/parse/               parser unit tests
+test/fuzz/                libFuzzer harnesses (wired into ctest)
+test/visl/                stateless oracle — empty, see Memory safety
+test/vicodec/             stateful oracle — empty, see Memory safety
 third_party/lw_abi/       vendored lw_video_sink.h (pinned by LW_ABI_VERSION)
 BUILD.gn                  GN target (lw_enable_v4l2_codec)
 ```
