@@ -111,6 +111,18 @@ option(V4L2WC_ENABLE_HW_TESTS "Build tests that need a real VAAPI/V4L2 device"
 if(V4L2WC_ENABLE_HW_TESTS AND V4L2WC_VA_INCLUDE)
   add_executable(vaapi_h265_hw_test test/hw/vaapi_h265_hw_test.cc)
   target_link_libraries(vaapi_h265_hw_test PRIVATE v4l2wc_core)
+
+  # The pixel test imports the decoder's dma-buf and detiles it via libva, so it
+  # links libva / libva-drm directly (the only place that does; the decode core
+  # still dlopens libva).
+  find_library(V4L2WC_LIBVA va)
+  find_library(V4L2WC_LIBVA_DRM va-drm)
+  if(V4L2WC_LIBVA AND V4L2WC_LIBVA_DRM)
+    add_executable(vaapi_h265_pixel_test test/hw/vaapi_h265_pixel_test.cc)
+    target_include_directories(vaapi_h265_pixel_test PRIVATE ${V4L2WC_VA_INCLUDE})
+    target_link_libraries(vaapi_h265_pixel_test
+      PRIVATE v4l2wc_core ${V4L2WC_LIBVA} ${V4L2WC_LIBVA_DRM})
+  endif()
 endif()
 
 # ---- fuzz gate -------------------------------------------------------------
