@@ -212,9 +212,8 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
 
   // Unsupported tools are dropped rather than mis-decoded. A non-flat scaling
   // list needs scaling_list_data (the parser skips it) and an IQ-matrix buffer;
-  // reference-list modification needs the list_entry values (not parsed);
-  // long-term references need their POC bookkeeping. Common HLS HEVC uses none
-  // of these.
+  // long-term references need their POC bookkeeping. Common HLS HEVC uses
+  // neither. Reference-list modification is now applied (see below).
   if (sps_.scaling_list_enabled_flag) {
     V4L2WC_LOG(V4L2WC_WARNING)
         << "vaapi-h265: scaling lists unsupported; dropping";
@@ -222,11 +221,6 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
   }
   if (pps_.tiles_enabled_flag) {
     V4L2WC_LOG(V4L2WC_WARNING) << "vaapi-h265: tiles unsupported; dropping";
-    return false;
-  }
-  if (pps_.lists_modification_present_flag) {
-    V4L2WC_LOG(V4L2WC_WARNING)
-        << "vaapi-h265: reference-list modification unsupported; dropping";
     return false;
   }
   if (sps_.long_term_ref_pics_present_flag) {
@@ -461,9 +455,9 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
 
   // Reference lists (clause 8.3.4). The temporary list cycles through the
   // current picture's short-term sets until it is at least as long as the
-  // active count, then the first entries are taken. Reference-list modification
-  // is not signalled (dropped above), so RefPicListX = RefPicListTempX. Each
-  // entry is stored as its index into ReferenceFrames[].
+  // active count. Without reference-list modification RefPicListX[i] is
+  // RefPicListTempX[i]; with it, RefPicListTempX[list_entry_lX[i]]. Each entry
+  // is stored as its index into ReferenceFrames[].
   const bool is_p = sh.slice_type == h265::SliceType::kP;
   const bool is_b = sh.slice_type == h265::SliceType::kB;
   // A reference the DPB no longer holds maps to 0xFF (invalid); it never
@@ -473,26 +467,30 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
                ? static_cast<std::uint8_t>(ref_index_by_slot[e.slot])
                : 0xFF;
   };
+  auto build_list = [](const std::vector<std::uint8_t>& temp, bool modified,
+                       const std::uint32_t* list_entry,
+                       std::uint32_t active_minus1, std::uint8_t* out_list) {
+    if (temp.empty()) return;
+    for (std::uint32_t i = 0; i <= active_minus1 && i < 15; ++i) {
+      std::uint32_t idx = modified ? list_entry[i] : i % temp.size();
+      idx %= temp.size();  // the parser bounds list_entry; clamp defensively
+      out_list[i] = temp[idx];
+    }
+  };
   if (is_p || is_b) {
     // L0: StCurrBefore, then StCurrAfter.
     std::vector<std::uint8_t> temp0;
     for (const auto& e : st_curr_before) temp0.push_back(ref_of(e));
     for (const auto& e : st_curr_after) temp0.push_back(ref_of(e));
-    if (!temp0.empty()) {
-      for (std::uint32_t i = 0; i <= sh.num_ref_idx_l0_active_minus1 && i < 15;
-           ++i)
-        sp.RefPicList[0][i] = temp0[i % temp0.size()];
-    }
+    build_list(temp0, sh.ref_pic_list_modification_flag_l0, sh.list_entry_l0,
+               sh.num_ref_idx_l0_active_minus1, sp.RefPicList[0]);
     if (is_b) {
       // L1: StCurrAfter, then StCurrBefore.
       std::vector<std::uint8_t> temp1;
       for (const auto& e : st_curr_after) temp1.push_back(ref_of(e));
       for (const auto& e : st_curr_before) temp1.push_back(ref_of(e));
-      if (!temp1.empty()) {
-        for (std::uint32_t i = 0;
-             i <= sh.num_ref_idx_l1_active_minus1 && i < 15; ++i)
-          sp.RefPicList[1][i] = temp1[i % temp1.size()];
-      }
+      build_list(temp1, sh.ref_pic_list_modification_flag_l1, sh.list_entry_l1,
+                 sh.num_ref_idx_l1_active_minus1, sp.RefPicList[1]);
     }
   }
   sp.LongSliceFlags.fields.LastSliceOfPic = 1;
