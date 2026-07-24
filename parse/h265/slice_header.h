@@ -35,6 +35,20 @@ enum class SliceType : uint32_t { kB = 0, kP = 1, kI = 2 };
 // at most 14, so at most 15 entries, indices 0..14).
 inline constexpr uint32_t kMaxSliceRefs = 15;
 
+// Upper bound on num_long_term_sps + num_long_term_pics; each term is
+// DPB-bounded (clause 7.4.7.1).
+inline constexpr uint32_t kMaxLongTermTotal = kMaxLongTermRps + kMaxRefPics;
+
+// A long-term reference the current slice signals (clause 7.3.6.1), resolved
+// against the SPS for the by-index entries. A stateless decoder derives its POC
+// from these and PicOrderCntVal.
+struct LongTermRef {
+  uint32_t poc_lsb = 0;       // PocLsbLt
+  bool used_by_curr = false;  // UsedByCurrPicLt
+  bool delta_poc_msb_present = false;
+  int32_t delta_poc_msb_cycle = 0;  // cumulative DeltaPocMsbCycleLt
+};
+
 // pred_weight_table (clause 7.3.6.3), as raw syntax elements per list (0 = L0,
 // 1 = L1) and reference index. Present only for a weighted P or B slice; a
 // stateless decoder derives the final weights and offsets from these.
@@ -64,9 +78,11 @@ struct SliceContext {
   bool sps_temporal_mvp_enabled_flag = false;
   bool long_term_ref_pics_present_flag = false;
   uint32_t num_long_term_ref_pics_sps = 0;
-  // used_by_curr_pic_lt_sps_flag per SPS long-term entry (from the SPS), used
-  // to derive NumPicTotalCurr. size() is num_long_term_ref_pics_sps.
+  // Per SPS long-term entry (from the SPS); size() is
+  // num_long_term_ref_pics_sps. A by-index long-term reference resolves its POC
+  // LSB and used flag through these.
   std::vector<bool> used_by_curr_pic_lt_sps;
+  std::vector<uint32_t> lt_ref_pic_poc_lsb_sps;
   // The SPS-defined short-term RPSs. size() is num_short_term_ref_pic_sets.
   std::vector<ShortTermRps> short_term_rps;
 
@@ -120,6 +136,9 @@ struct SliceHeader {
   ShortTermRps current_rps;
   uint32_t num_long_term_sps = 0;
   uint32_t num_long_term_pics = 0;
+  // The long-term references, indices 0..num_long_term_sps+num_long_term_pics-1
+  // (present only when the SPS enables long-term references).
+  LongTermRef long_term_refs[kMaxLongTermTotal] = {};
   bool slice_temporal_mvp_enabled_flag = false;
 
   bool slice_sao_luma_flag = false;

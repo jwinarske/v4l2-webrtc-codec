@@ -301,6 +301,61 @@ int main() {
                             mctx, &sh));
   }
 
+  // Synthetic P slice with long-term references: one from the SPS (by index)
+  // and one signalled explicitly with a delta-POC-MSB cycle.
+  {
+    SliceContext lctx;
+    lctx.pic_size_in_ctbs = 1;
+    lctx.log2_max_pic_order_cnt_lsb = 4;
+    lctx.chroma_array_type = 1;
+    lctx.long_term_ref_pics_present_flag = true;
+    lctx.num_long_term_ref_pics_sps = 1;
+    lctx.used_by_curr_pic_lt_sps = {true};
+    lctx.lt_ref_pic_poc_lsb_sps = {3};
+    ShortTermRps empty_rps;  // no short-term references
+    lctx.short_term_rps = {empty_rps};
+
+    BitWriter w;
+    w.WriteFlag(true);  // first_slice_segment_in_pic_flag
+    w.WriteUe(0);       // slice_pic_parameter_set_id
+    w.WriteUe(1);       // slice_type = P
+    w.WriteBits(5, 4);  // slice_pic_order_cnt_lsb
+    w.WriteFlag(true);  // short_term_ref_pic_set_sps_flag (num_st_rps == 1)
+    // long-term references:
+    w.WriteUe(1);  // num_long_term_sps
+    w.WriteUe(1);  // num_long_term_pics
+    // entry 0 (from SPS, only one entry so no lt_idx_sps):
+    w.WriteFlag(false);  // delta_poc_msb_present_flag[0]
+    // entry 1 (explicit):
+    w.WriteBits(7, 4);   // poc_lsb_lt[1]
+    w.WriteFlag(false);  // used_by_curr_pic_lt_flag[1]
+    w.WriteFlag(true);   // delta_poc_msb_present_flag[1]
+    w.WriteUe(2);        // delta_poc_msb_cycle_lt[1]
+    // P reference block: no override (defaults), NumPicTotalCurr = 1.
+    w.WriteFlag(false);  // num_ref_idx_active_override_flag
+    w.WriteUe(0);        // five_minus_max_num_merge_cand
+    w.WriteUe(0);        // slice_qp_delta se(0)
+    w.WriteFlag(true);   // byte_alignment
+    const std::vector<uint8_t> rbsp = w.bytes();
+
+    SliceHeader sh;
+    const bool ok = ParseSliceHeader(rbsp.data(), rbsp.size(),
+                                     NalUnitType::kTrailR, lctx, &sh);
+    CHECK(ok);
+    CHECK(sh.num_long_term_sps == 1);
+    CHECK(sh.num_long_term_pics == 1);
+    CHECK(sh.long_term_refs[0].poc_lsb == 3);
+    CHECK(sh.long_term_refs[0].used_by_curr == true);
+    CHECK(sh.long_term_refs[0].delta_poc_msb_present == false);
+    CHECK(sh.long_term_refs[1].poc_lsb == 7);
+    CHECK(sh.long_term_refs[1].used_by_curr == false);
+    CHECK(sh.long_term_refs[1].delta_poc_msb_present == true);
+    CHECK(sh.long_term_refs[1].delta_poc_msb_cycle == 2);
+    // Only the used long-term reference (entry 0) counts toward
+    // NumPicTotalCurr.
+    CHECK(sh.num_pic_total_curr == 1);
+  }
+
   // Synthetic dependent slice segment: parsing ends after the segment address.
   {
     SliceContext dctx;

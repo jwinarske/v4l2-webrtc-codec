@@ -477,6 +477,7 @@ bool ParseSps(const uint8_t* rbsp, size_t size, Sps* out) {
       return false;
     }
     sps.used_by_curr_pic_lt_sps.reserve(sps.num_long_term_ref_pics_sps);
+    sps.lt_ref_pic_poc_lsb_sps.reserve(sps.num_long_term_ref_pics_sps);
     for (uint32_t i = 0; i < sps.num_long_term_ref_pics_sps; ++i) {
       uint32_t lt_ref_pic_poc_lsb = 0;
       bool used_by_curr_pic_lt = false;
@@ -484,6 +485,7 @@ bool ParseSps(const uint8_t* rbsp, size_t size, Sps* out) {
           !br.ReadFlag(&used_by_curr_pic_lt)) {
         return false;
       }
+      sps.lt_ref_pic_poc_lsb_sps.push_back(lt_ref_pic_poc_lsb);
       // Needed by the slice-segment header to derive NumPicTotalCurr for a
       // long-term reference that selects this SPS entry by lt_idx_sps.
       sps.used_by_curr_pic_lt_sps.push_back(used_by_curr_pic_lt);

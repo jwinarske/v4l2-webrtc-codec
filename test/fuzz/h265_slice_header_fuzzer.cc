@@ -37,6 +37,12 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   ctx.sps_temporal_mvp_enabled_flag = (cfg2 >> 4) & 1;
   ctx.long_term_ref_pics_present_flag = (cfg2 >> 5) & 1;
   ctx.num_long_term_ref_pics_sps = (cfg2 >> 6) & 3;
+  // Give the SPS long-term tables a consistent size so a by-index long-term
+  // reference resolves rather than being rejected on an empty table.
+  for (uint32_t i = 0; i < ctx.num_long_term_ref_pics_sps; ++i) {
+    ctx.lt_ref_pic_poc_lsb_sps.push_back(i);
+    ctx.used_by_curr_pic_lt_sps.push_back((cfg2 >> i) & 1);
+  }
   ctx.dependent_slice_segments_enabled_flag = (cfg0 >> 7) & 1;
   ctx.num_extra_slice_header_bits = (cfg1 >> 5) & 7;
   ctx.output_flag_present_flag = (cfg0 >> 6) & 1;

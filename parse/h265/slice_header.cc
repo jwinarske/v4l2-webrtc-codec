@@ -15,10 +15,6 @@ SliceHeader& SliceHeader::operator=(SliceHeader&&) noexcept = default;
 
 namespace {
 
-// Bound on num_long_term_sps + num_long_term_pics, which sizes the long-term
-// reference loop. Well above any real count (both are DPB-bounded).
-constexpr uint32_t kMaxLongTermTotal = kMaxLongTermRps + kMaxRefPics;
-
 // Bound on num_entry_point_offsets. One entry point starts each tile or CTB
 // row beyond the first, so PicSizeInCtbsY is a safe over-bound; kMaxDimension /
 // 16 squared is the ceiling when the context does not supply the picture size.
@@ -235,8 +231,9 @@ bool ParseSliceHeader(const uint8_t* rbsp, size_t size, NalUnitType nal_type,
         return false;
       }
       const uint32_t total = sh.num_long_term_sps + sh.num_long_term_pics;
+      int32_t delta_poc_msb_cycle = 0;  // cumulative DeltaPocMsbCycleLt
       for (uint32_t i = 0; i < total; ++i) {
-        bool used_by_curr_pic_lt = false;
+        LongTermRef& lt = sh.long_term_refs[i];
         if (i < sh.num_long_term_sps) {
           uint32_t lt_idx_sps = 0;
           if (ctx.num_long_term_ref_pics_sps > 1 &&
@@ -244,30 +241,48 @@ bool ParseSliceHeader(const uint8_t* rbsp, size_t size, NalUnitType nal_type,
                            &lt_idx_sps)) {
             return false;
           }
-          if (lt_idx_sps >= ctx.used_by_curr_pic_lt_sps.size()) {
+          if (lt_idx_sps >= ctx.used_by_curr_pic_lt_sps.size() ||
+              lt_idx_sps >= ctx.lt_ref_pic_poc_lsb_sps.size()) {
             return false;
           }
-          used_by_curr_pic_lt = ctx.used_by_curr_pic_lt_sps[lt_idx_sps];
+          lt.poc_lsb = ctx.lt_ref_pic_poc_lsb_sps[lt_idx_sps];
+          lt.used_by_curr = ctx.used_by_curr_pic_lt_sps[lt_idx_sps];
         } else {
-          uint32_t poc_lsb_lt = 0;
-          if (!br.ReadBits(ctx.log2_max_pic_order_cnt_lsb, &poc_lsb_lt) ||
-              !br.ReadFlag(&used_by_curr_pic_lt)) {
+          if (!br.ReadBits(ctx.log2_max_pic_order_cnt_lsb, &lt.poc_lsb) ||
+              !br.ReadFlag(&lt.used_by_curr)) {
             return false;
           }
         }
-        if (used_by_curr_pic_lt) {
+        if (lt.used_by_curr) {
           ++num_long_term_used;
         }
-        bool delta_poc_msb_present = false;
-        if (!br.ReadFlag(&delta_poc_msb_present)) {
+        if (!br.ReadFlag(&lt.delta_poc_msb_present)) {
           return false;
         }
-        if (delta_poc_msb_present) {
+        if (lt.delta_poc_msb_present) {
           uint32_t delta_poc_msb_cycle_lt = 0;
           if (!br.ReadUe(&delta_poc_msb_cycle_lt)) {
             return false;
           }
+          // Bound the cumulative cycle so the decoder's
+          // DeltaPocMsbCycleLt * MaxPicOrderCntLsb stays well inside int32.
+          if (delta_poc_msb_cycle_lt > 0xffff) {
+            return false;
+          }
+          // DeltaPocMsbCycleLt resets at each of the two entry groups (clause
+          // 7.4.7.1) and otherwise accumulates.
+          delta_poc_msb_cycle =
+              (i == 0 || i == sh.num_long_term_sps)
+                  ? static_cast<int32_t>(delta_poc_msb_cycle_lt)
+                  : delta_poc_msb_cycle +
+                        static_cast<int32_t>(delta_poc_msb_cycle_lt);
+          if (delta_poc_msb_cycle > 0xffff) {
+            return false;
+          }
+        } else if (i == 0 || i == sh.num_long_term_sps) {
+          delta_poc_msb_cycle = 0;
         }
+        lt.delta_poc_msb_cycle = delta_poc_msb_cycle;
       }
     }
 
