@@ -136,7 +136,12 @@ bool VaapiH265Decoder::EnsureConfigured(const h265::Sps& sps) {
   coded_w_ = sps.pic_width_in_luma_samples;
   coded_h_ = sps.pic_height_in_luma_samples;
   coded_bit_depth_ = sps.bit_depth_luma;
-  is_rext_ = fmt.is_rext;
+  // Send the Extension VA buffers for the 4:2:2/4:4:4 formats, and also when
+  // high_precision_offsets is set at any chroma format: the wider weighted-
+  // prediction offsets it enables only fit the int16 fields in the range-
+  // extension slice-parameter buffer.
+  is_rext_ =
+      fmt.is_rext || sps.range_extension.high_precision_offsets_enabled_flag;
   const VAProfile profile = fmt.profile;
   const unsigned rt_format = fmt.rt_format;
   const unsigned fourcc = fmt.fourcc;
@@ -790,9 +795,17 @@ bool VaapiH265Decoder::DecodePicture(
     sp.slice_data_num_emu_prevn_bytes =
         static_cast<std::uint16_t>(num_emu_bytes);
 
+    // Range-extension slice parameters. The wider int16 offsets in the
+    // extension buffer carry the full range when high_precision_offsets is set;
+    // otherwise they mirror the base int8 ones.
+    VASliceParameterBufferHEVCExtension sp_ext{};
+
     // Weighted prediction (clause 7.4.7.3). VA takes the luma weight/offset
     // deltas as-is and the derived chroma offsets. An unflagged reference keeps
-    // the default weight (delta 0) and zero offset.
+    // the default weight (delta 0) and zero offset. With high_precision_offsets
+    // the offsets exceed int8, so the full value goes to the extension buffer's
+    // int16 fields while the base int8 fields keep the truncated copy (unused
+    // on that path, since high precision forces the extension buffer).
     if (is_p || is_b) {
       const auto& w = ssh.pred_weight;
       sp.luma_log2_weight_denom =
@@ -801,14 +814,22 @@ bool VaapiH265Decoder::DecodePicture(
           static_cast<std::int8_t>(w.delta_chroma_log2_weight_denom);
       const int chroma_denom = static_cast<int>(w.luma_log2_weight_denom) +
                                w.delta_chroma_log2_weight_denom;
-      constexpr int kWpOffsetHalfRangeC = 128;  // 8-bit, no high precision
+      const bool high_precision =
+          sps_.range_extension.high_precision_offsets_enabled_flag;
+      const int bit_depth = static_cast<int>(coded_bit_depth_);
+      const int wp_half_y = h265::WpOffsetHalfRange(bit_depth, high_precision);
+      const int wp_half_c = h265::WpOffsetHalfRange(bit_depth, high_precision);
       auto fill = [&](int list, std::uint32_t active_minus1,
                       std::int8_t (&dlw)[15], std::int8_t (&lo)[15],
-                      std::int8_t (&dcw)[15][2], std::int8_t (&co)[15][2]) {
+                      std::int8_t (&dcw)[15][2], std::int8_t (&co)[15][2],
+                      std::int16_t (&lo16)[15], std::int16_t (&co16)[15][2]) {
         for (std::uint32_t i = 0; i <= active_minus1 && i < 15; ++i) {
           if (w.luma_weight_flag[list][i]) {
             dlw[i] = static_cast<std::int8_t>(w.delta_luma_weight[list][i]);
-            lo[i] = static_cast<std::int8_t>(w.luma_offset[list][i]);
+            const int loff =
+                w.luma_offset[list][i];  // range [-half_y, half_y-1]
+            lo[i] = static_cast<std::int8_t>(loff);
+            lo16[i] = static_cast<std::int16_t>(loff);
           }
           if (w.chroma_weight_flag[list][i]) {
             for (int j = 0; j < 2; ++j) {
@@ -816,39 +837,29 @@ bool VaapiH265Decoder::DecodePicture(
                   (1 << chroma_denom) + w.delta_chroma_weight[list][i][j];
               dcw[i][j] =
                   static_cast<std::int8_t>(w.delta_chroma_weight[list][i][j]);
-              int off = kWpOffsetHalfRangeC +
-                        w.delta_chroma_offset[list][i][j] -
-                        ((kWpOffsetHalfRangeC * cweight) >> chroma_denom);
-              if (off < -kWpOffsetHalfRangeC) off = -kWpOffsetHalfRangeC;
-              if (off > kWpOffsetHalfRangeC - 1) off = kWpOffsetHalfRangeC - 1;
+              const int off = h265::DeriveChromaOffset(
+                  wp_half_c, w.delta_chroma_offset[list][i][j], cweight,
+                  chroma_denom);
               co[i][j] = static_cast<std::int8_t>(off);
+              co16[i][j] = static_cast<std::int16_t>(off);
             }
           }
         }
       };
+      (void)wp_half_y;  // luma offset is signalled within range; no clamp here
       fill(0, ssh.num_ref_idx_l0_active_minus1, sp.delta_luma_weight_l0,
-           sp.luma_offset_l0, sp.delta_chroma_weight_l0, sp.ChromaOffsetL0);
+           sp.luma_offset_l0, sp.delta_chroma_weight_l0, sp.ChromaOffsetL0,
+           sp_ext.rext.luma_offset_l0, sp_ext.rext.ChromaOffsetL0);
       if (is_b)
         fill(1, ssh.num_ref_idx_l1_active_minus1, sp.delta_luma_weight_l1,
-             sp.luma_offset_l1, sp.delta_chroma_weight_l1, sp.ChromaOffsetL1);
+             sp.luma_offset_l1, sp.delta_chroma_weight_l1, sp.ChromaOffsetL1,
+             sp_ext.rext.luma_offset_l1, sp_ext.rext.ChromaOffsetL1);
     }
 
-    // Range-extension slice parameters.
-    VASliceParameterBufferHEVCExtension sp_ext{};
     if (is_rext_) {
-      sp_ext.base = sp;
+      sp_ext.base = sp;  // leaves rext.*_offset_* (filled above) intact
       sp_ext.rext.slice_ext_flags.bits.cu_chroma_qp_offset_enabled_flag =
           ssh.cu_chroma_qp_offset_enabled_flag;
-      // The wider (int16) offsets mirror the base int8 ones; they carry the
-      // full range when high_precision_offsets is set.
-      for (int i = 0; i < 15; ++i) {
-        sp_ext.rext.luma_offset_l0[i] = sp.luma_offset_l0[i];
-        sp_ext.rext.luma_offset_l1[i] = sp.luma_offset_l1[i];
-        for (int j = 0; j < 2; ++j) {
-          sp_ext.rext.ChromaOffsetL0[i][j] = sp.ChromaOffsetL0[i][j];
-          sp_ext.rext.ChromaOffsetL1[i][j] = sp.ChromaOffsetL1[i][j];
-        }
-      }
     }
 
     VABufferID b_sp = 0, b_sd = 0;

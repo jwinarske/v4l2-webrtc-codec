@@ -63,6 +63,32 @@ struct PredWeightTable {
   int32_t delta_chroma_offset[2][kMaxSliceRefs][2] = {};
 };
 
+// WpOffsetHalfRangeY / WpOffsetHalfRangeC (clause 7.4.7.3). With the
+// range-extensions high_precision_offsets tool the offsets span the full bit
+// depth (1 << (BitDepth - 1)); otherwise they are 8-bit (1 << 7) regardless of
+// the coded bit depth. Both luma and chroma use the same form against their
+// respective bit depth.
+[[nodiscard]] inline int WpOffsetHalfRange(int bit_depth,
+                                           bool high_precision_offsets) {
+  return 1 << (high_precision_offsets ? (bit_depth - 1) : 7);
+}
+
+// ChromaOffsetLx[i][j] (clause 7.4.7.3): the signalled delta_chroma_offset is
+// derived into the final offset the decoder uses, then clipped to
+// [-half_range, half_range - 1]. `chroma_weight` is the derived ChromaWeightLx
+// ((1 << chroma_log2_denom) + delta_chroma_weight) and `chroma_log2_denom` is
+// ChromaLog2WeightDenom.
+[[nodiscard]] inline int DeriveChromaOffset(int half_range,
+                                            int delta_chroma_offset,
+                                            int chroma_weight,
+                                            int chroma_log2_denom) {
+  int off = half_range + delta_chroma_offset -
+            ((half_range * chroma_weight) >> chroma_log2_denom);
+  if (off < -half_range) off = -half_range;
+  if (off > half_range - 1) off = half_range - 1;
+  return off;
+}
+
 // Fields the slice-segment header parse needs from the active SPS and PPS.
 struct SliceContext {
   SliceContext();

@@ -421,6 +421,39 @@ int main() {
                             NalUnitType::kTrailR, dctx, &sh));
   }
 
+  // Weighted-prediction offset derivation (clause 7.4.7.3).
+  {
+    // WpOffsetHalfRange: 8-bit fixed (1 << 7) without high precision, at any
+    // coded bit depth; full bit-depth range (1 << (BitDepth-1)) with it.
+    CHECK(WpOffsetHalfRange(8, false) == 128);
+    CHECK(WpOffsetHalfRange(10, false) == 128);  // NOT 512 without high prec.
+    CHECK(WpOffsetHalfRange(12, false) == 128);
+    CHECK(WpOffsetHalfRange(8, true) == 128);
+    CHECK(WpOffsetHalfRange(10, true) == 512);
+    CHECK(WpOffsetHalfRange(12, true) == 2048);
+
+    // DeriveChromaOffset: with a default chroma weight (== 1 << denom) the
+    // weighting term cancels the half range, so the result is exactly
+    // delta_chroma_offset, clipped to [-half, half-1].
+    const int denom = 6;
+    const int default_w = 1 << denom;
+    CHECK(DeriveChromaOffset(128, 0, default_w, denom) == 0);
+    CHECK(DeriveChromaOffset(128, 40, default_w, denom) == 40);
+    CHECK(DeriveChromaOffset(128, -40, default_w, denom) == -40);
+    // Clipping to the half-range bounds.
+    CHECK(DeriveChromaOffset(128, 1000, default_w, denom) == 127);
+    CHECK(DeriveChromaOffset(128, -1000, default_w, denom) == -128);
+    // High precision at 10-bit: a value that would overflow int8 survives,
+    // proving the wide path is needed (it must reach the int16 VA field).
+    CHECK(DeriveChromaOffset(512, 300, default_w, denom) == 300);
+    CHECK(DeriveChromaOffset(512, -300, default_w, denom) == -300);
+    CHECK(DeriveChromaOffset(512, 10000, default_w, denom) == 511);
+    // A non-default weight shifts the derived offset by the weighting term:
+    // half + delta - ((half * w) >> denom). half=128, w=128 (2x), denom=6 ->
+    // 128 + 10 - ((128*128)>>6) = 128 + 10 - 256 = -118.
+    CHECK(DeriveChromaOffset(128, 10, 128, denom) == -118);
+  }
+
   if (g_failures == 0) {
     std::printf("H265_SLICE_HEADER_TEST_OK\n");
     return 0;
