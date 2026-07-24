@@ -16,3 +16,17 @@ add_executable(pi_hevc_stateless
   ${REPO_ROOT}/parse/h265/scaling_list.cc)
 target_include_directories(pi_hevc_stateless PRIVATE ${REPO_ROOT})
 target_compile_options(pi_hevc_stateless PRIVATE -Wall -Wextra)
+
+# The full IDmaDecoder backend (src/) plus an on-device test that drives it.
+add_executable(pi_hevc_backend_test
+  pi_hevc_backend_test.cc
+  ${REPO_ROOT}/src/v4l2_stateless_h265_decoder.cc
+  ${REPO_ROOT}/src/dma_decoder.cc
+  ${REPO_ROOT}/src/log.cc
+  ${REPO_ROOT}/parse/h265/nal.cc
+  ${REPO_ROOT}/parse/h265/sps.cc
+  ${REPO_ROOT}/parse/h265/pps.cc
+  ${REPO_ROOT}/parse/h265/slice_header.cc
+  ${REPO_ROOT}/parse/h265/scaling_list.cc)
+target_include_directories(pi_hevc_backend_test PRIVATE ${REPO_ROOT})
+target_compile_options(pi_hevc_backend_test PRIVATE -Wall -Wextra)

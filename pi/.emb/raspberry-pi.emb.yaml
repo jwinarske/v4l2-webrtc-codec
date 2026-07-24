@@ -9,3 +9,8 @@ cross:
       backends:
         default:
           CMAKE_BUILD_TYPE: Release
+    rpi5-trixie:
+      extends: rpi5-trixie
+      backends:
+        default:
+          CMAKE_BUILD_TYPE: Release

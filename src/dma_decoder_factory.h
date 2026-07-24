@@ -23,6 +23,7 @@ struct DmaDecoderConfig {
 
   // Device overrides; a null or empty value selects the library default.
   const char* v4l2_device = nullptr;        // default "/dev/video10"
+  const char* v4l2_hevc_device = nullptr;   // stateless HEVC, default video19
   const char* vaapi_render_node = nullptr;  // default "/dev/dri/renderD128"
 };
 

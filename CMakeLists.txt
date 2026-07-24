@@ -79,6 +79,7 @@ add_library(v4l2wc_core STATIC
   src/dma_decoder.cc
   src/dma_decoder_factory.cc
   src/v4l2_m2m_decoder.cc
+  src/v4l2_stateless_h265_decoder.cc
 )
 target_link_libraries(v4l2wc_core PUBLIC v4l2wc_parse)
 target_include_directories(v4l2wc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

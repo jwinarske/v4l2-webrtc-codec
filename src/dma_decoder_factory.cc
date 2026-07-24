@@ -10,6 +10,7 @@
 
 #include "src/log.h"
 #include "src/v4l2_m2m_decoder.h"
+#include "src/v4l2_stateless_h265_decoder.h"
 #if V4L2WC_HAVE_VAAPI
 #include "src/vaapi_h264_decoder.h"
 #include "src/vaapi_h265_decoder.h"
@@ -37,6 +38,22 @@ std::unique_ptr<IDmaDecoder> CreateDmaDecoder(const DmaDecoderConfig& config) {
     V4L2WC_LOG(V4L2WC_INFO) << "v4l2wc: V4L2 M2M decoder on " << device << " "
                             << config.coded_width << "x" << config.coded_height;
     return v4l2;
+  }
+
+  // The V4L2 stateless HEVC engine (e.g. rpi-hevc-dec on the Pi): the embedded
+  // HEVC path, which the M2M stateful codec above does not carry.
+  if (config.codec_fourcc == V4L2_PIX_FMT_HEVC) {
+    const char* hevc_node =
+        (config.v4l2_hevc_device != nullptr && config.v4l2_hevc_device[0])
+            ? config.v4l2_hevc_device
+            : "/dev/video19";
+    if (auto stateless =
+            V4l2StatelessH265Decoder::Create(hevc_node, /*pool_size=*/16)) {
+      V4L2WC_LOG(V4L2WC_INFO)
+          << "v4l2wc: V4L2 stateless HEVC decoder on " << hevc_node << " "
+          << config.coded_width << "x" << config.coded_height;
+      return stateless;
+    }
   }
 
 #if V4L2WC_HAVE_VAAPI

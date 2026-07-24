@@ -11,3 +11,9 @@ targets:
     toolchain_version: '15.2.rel1'
     sysroot_key: '1f2a090a52d0'
     build_key: '3c2a0f65f840'
+  'rpi5-trixie':
+    provider: 'arm-gnu'
+    triple: 'aarch64-none-linux-gnu'
+    toolchain_version: '15.2.rel1'
+    sysroot_key: '1f2a090a52d0'
+    build_key: '4268b17cc86b'
