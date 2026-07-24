@@ -102,6 +102,17 @@ add_executable(v4l2wc_core_test test/core/core_smoke_test.cc)
 target_link_libraries(v4l2wc_core_test PRIVATE v4l2wc_core)
 add_test(NAME v4l2wc_core_test COMMAND v4l2wc_core_test)
 
+# On-hardware tests need a real VAAPI/V4L2 device and a stream argument, so they
+# are opt-in and never registered with ctest. Validated on an AMD Radeon
+# (radeonsi): HEVC Main and Main 10 clips decode every frame with no driver
+# error. Run e.g.: ./vaapi_h265_hw_test main420.hevc /dev/dri/renderD128
+option(V4L2WC_ENABLE_HW_TESTS "Build tests that need a real VAAPI/V4L2 device"
+       OFF)
+if(V4L2WC_ENABLE_HW_TESTS AND V4L2WC_VA_INCLUDE)
+  add_executable(vaapi_h265_hw_test test/hw/vaapi_h265_hw_test.cc)
+  target_link_libraries(vaapi_h265_hw_test PRIVATE v4l2wc_core)
+endif()
+
 # ---- fuzz gate -------------------------------------------------------------
 # The bitstream is attacker-controlled and reachable once DTLS is up, so the
 # parsers are fuzzed rather than only unit-tested. Needs a clang that can build
