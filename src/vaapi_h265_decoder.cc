@@ -76,23 +76,41 @@ VaapiH265Decoder::~VaapiH265Decoder() {
 
 bool VaapiH265Decoder::EnsureConfigured(const h265::Sps& sps) {
   if (configured_) return true;
+  // Main and Main 10 are 4:2:0, 8-bit or 10-bit. Anything else (4:2:2 / 4:4:4,
+  // higher bit depth) needs a different profile and surface format than this
+  // engine sets up.
+  if (sps.chroma_format_idc != 1 ||
+      (sps.bit_depth_luma != 8 && sps.bit_depth_luma != 10) ||
+      sps.bit_depth_chroma != sps.bit_depth_luma) {
+    V4L2WC_LOG(V4L2WC_WARNING)
+        << "vaapi-h265: unsupported format (chroma_format_idc="
+        << sps.chroma_format_idc << " bit_depth=" << sps.bit_depth_luma << ")";
+    return false;
+  }
   coded_w_ = sps.pic_width_in_luma_samples;
   coded_h_ = sps.pic_height_in_luma_samples;
-  VAConfigAttrib attr = {VAConfigAttribRTFormat, VA_RT_FORMAT_YUV420};
+  coded_bit_depth_ = sps.bit_depth_luma;
+  const bool is_10bit = sps.bit_depth_luma == 10;
+  const VAProfile profile = is_10bit ? VAProfileHEVCMain10 : VAProfileHEVCMain;
+  const unsigned rt_format =
+      is_10bit ? VA_RT_FORMAT_YUV420_10 : VA_RT_FORMAT_YUV420;
+  const unsigned fourcc = is_10bit ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+
+  VAConfigAttrib attr = {VAConfigAttribRTFormat, rt_format};
   VAConfigID cfg = 0;
-  VAStatus s = va_.CreateConfig(dpy_, VAProfileHEVCMain, VAEntrypointVLD, &attr,
-                                1, &cfg);
+  VAStatus s = va_.CreateConfig(dpy_, profile, VAEntrypointVLD, &attr, 1, &cfg);
   if (s != VA_STATUS_SUCCESS) {
     V4L2WC_LOG(V4L2WC_ERROR) << "vaapi-h265: CreateConfig: " << va_.ErrorStr(s);
     return false;
   }
   config_ = cfg;
   std::vector<VASurfaceID> surfs(pool_size_);
-  VASurfaceAttrib sa = {VASurfaceAttribPixelFormat,
-                        VA_SURFACE_ATTRIB_SETTABLE,
-                        {VAGenericValueTypeInteger, {.i = VA_FOURCC_NV12}}};
-  s = va_.CreateSurfaces(dpy_, VA_RT_FORMAT_YUV420, coded_w_, coded_h_,
-                         surfs.data(), pool_size_, &sa, 1);
+  VASurfaceAttrib sa = {
+      VASurfaceAttribPixelFormat,
+      VA_SURFACE_ATTRIB_SETTABLE,
+      {VAGenericValueTypeInteger, {.i = static_cast<int>(fourcc)}}};
+  s = va_.CreateSurfaces(dpy_, rt_format, coded_w_, coded_h_, surfs.data(),
+                         pool_size_, &sa, 1);
   if (s != VA_STATUS_SUCCESS) {
     V4L2WC_LOG(V4L2WC_ERROR)
         << "vaapi-h265: CreateSurfaces: " << va_.ErrorStr(s);
@@ -111,7 +129,8 @@ bool VaapiH265Decoder::EnsureConfigured(const h265::Sps& sps) {
   context_ = ctx;
   configured_ = true;
   V4L2WC_LOG(V4L2WC_INFO) << "vaapi-h265: configured " << coded_w_ << "x"
-                          << coded_h_ << " pool=" << pool_size_;
+                          << coded_h_ << " " << coded_bit_depth_
+                          << "-bit pool=" << pool_size_;
   return true;
 }
 
@@ -747,11 +766,13 @@ SubmitResult VaapiH265Decoder::SubmitBitstream(const std::uint8_t* data,
       h265::Sps s{};
       if (h265::ParseSps(n.rbsp.data(), n.rbsp.size(), &s)) {
         if (configured_ && (s.pic_width_in_luma_samples != coded_w_ ||
-                            s.pic_height_in_luma_samples != coded_h_)) {
+                            s.pic_height_in_luma_samples != coded_h_ ||
+                            s.bit_depth_luma != coded_bit_depth_)) {
           V4L2WC_LOG(V4L2WC_INFO)
               << "vaapi-h265: stream changed to " << s.pic_width_in_luma_samples
-              << "x" << s.pic_height_in_luma_samples << " from " << coded_w_
-              << "x" << coded_h_;
+              << "x" << s.pic_height_in_luma_samples << " " << s.bit_depth_luma
+              << "-bit from " << coded_w_ << "x" << coded_h_ << " "
+              << coded_bit_depth_ << "-bit";
           return SubmitResult::kSourceChange;
         }
         sps_ = s;

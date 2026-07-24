@@ -219,6 +219,25 @@ int main() {
           sps.pic_width_in_ctbs * sps.pic_height_in_ctbs);
   }
 
+  // A real Main 10 SPS (libx265, 640x480, 10-bit 4:2:0): the bit depths drive
+  // the decoder's profile and surface-format choice.
+  {
+    Sps sps;
+    const bool ok = ParseSpsFromNal(
+        {0x42, 0x01, 0x01, 0x02, 0x20, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00,
+         0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x5a, 0xa0, 0x05, 0x02, 0x01,
+         0xe1, 0x36, 0x59, 0x59, 0xa4, 0x93, 0x2b, 0xc0, 0x5a, 0x02, 0x00,
+         0x00, 0x03, 0x00, 0x02, 0x00, 0x00, 0x03, 0x00, 0x32, 0x10},
+        &sps);
+    CHECK(ok);
+    CHECK(sps.width == 640);
+    CHECK(sps.height == 480);
+    CHECK(sps.chroma_format_idc == 1);  // 4:2:0
+    CHECK(sps.bit_depth_luma == 10);
+    CHECK(sps.bit_depth_chroma == 10);
+    CHECK(sps.general_profile_idc == 2);  // Main 10
+  }
+
   // Truncating a real SPS must fail rather than read past the buffer.
   {
     Sps sps;

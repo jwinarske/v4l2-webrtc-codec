@@ -109,6 +109,7 @@ class VaapiH265Decoder : public IDmaDecoder {
   unsigned context_ = 0;  // VAContextID
   bool configured_ = false;
   std::uint32_t coded_w_ = 0, coded_h_ = 0;
+  std::uint32_t coded_bit_depth_ = 8;  // 8 (Main) or 10 (Main 10)
   std::uint32_t pool_size_ = 0;
 
   h265::Sps sps_{};
