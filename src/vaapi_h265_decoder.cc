@@ -211,14 +211,6 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
     return false;
   }
 
-  // A non-flat scaling list needs scaling_list_data (the parser skips it) and
-  // an IQ-matrix buffer, which is not built yet; common HLS HEVC keeps this
-  // off.
-  if (sps_.scaling_list_enabled_flag) {
-    V4L2WC_LOG(V4L2WC_WARNING)
-        << "vaapi-h265: scaling lists unsupported; dropping";
-    return false;
-  }
   // The VA picture buffer holds column_width_minus1[19] /
   // row_height_minus1[21], so more tiles than that cannot be described; drop
   // rather than overflow.
@@ -661,7 +653,27 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
            sp.luma_offset_l1, sp.delta_chroma_weight_l1, sp.ChromaOffsetL1);
   }
 
-  VABufferID b_pp = 0, b_sp = 0, b_sd = 0;
+  // When scaling lists are enabled, the inverse-quantisation matrix is the
+  // active list (the PPS override if present, else the SPS list, which the
+  // parser filled with either the signalled or the default coefficients). The
+  // ScalingListData layout matches VAIQMatrixBufferHEVC field for field.
+  VAIQMatrixBufferHEVC iq{};
+  const bool have_iq = sps_.scaling_list_enabled_flag;
+  if (have_iq) {
+    const h265::ScalingListData& sl = pps_.pps_scaling_list_data_present_flag
+                                          ? pps_.scaling_list
+                                          : sps_.scaling_list;
+    std::memcpy(iq.ScalingList4x4, sl.list4x4, sizeof(iq.ScalingList4x4));
+    std::memcpy(iq.ScalingList8x8, sl.list8x8, sizeof(iq.ScalingList8x8));
+    std::memcpy(iq.ScalingList16x16, sl.list16x16, sizeof(iq.ScalingList16x16));
+    std::memcpy(iq.ScalingList32x32, sl.list32x32, sizeof(iq.ScalingList32x32));
+    std::memcpy(iq.ScalingListDC16x16, sl.dc16x16,
+                sizeof(iq.ScalingListDC16x16));
+    std::memcpy(iq.ScalingListDC32x32, sl.dc32x32,
+                sizeof(iq.ScalingListDC32x32));
+  }
+
+  VABufferID b_pp = 0, b_sp = 0, b_sd = 0, b_iq = 0;
   auto ck = [&](VAStatus s, const char* what) {
     if (s != VA_STATUS_SUCCESS)
       V4L2WC_LOG(V4L2WC_ERROR)
@@ -679,9 +691,15 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
                            const_cast<std::uint8_t*>(nal.raw.data()), &b_sd),
           "data buf"))
     return false;
+  if (have_iq && !ck(va_.CreateBuffer(dpy_, context_, VAIQMatrixBufferType,
+                                      sizeof(iq), 1, &iq, &b_iq),
+                     "iq buf"))
+    return false;
   bool ok = ck(va_.BeginPicture(dpy_, context_, surf), "BeginPicture");
-  ok =
-      ok && ck(va_.RenderPicture(dpy_, context_, &b_pp, 1), "RenderPicture pp");
+  // Header buffers: the picture parameters, and the IQ matrix when present.
+  VABufferID hdr[2] = {b_pp, b_iq};
+  ok = ok && ck(va_.RenderPicture(dpy_, context_, hdr, have_iq ? 2 : 1),
+                "RenderPicture hdr");
   VABufferID sl[2] = {b_sp, b_sd};
   ok =
       ok && ck(va_.RenderPicture(dpy_, context_, sl, 2), "RenderPicture slice");
@@ -690,6 +708,7 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
   va_.DestroyBuffer(dpy_, b_pp);
   va_.DestroyBuffer(dpy_, b_sp);
   va_.DestroyBuffer(dpy_, b_sd);
+  if (have_iq) va_.DestroyBuffer(dpy_, b_iq);
   if (!ok) return false;
 
   // Park as ready (latest-wins). A previously parked frame that is not a
