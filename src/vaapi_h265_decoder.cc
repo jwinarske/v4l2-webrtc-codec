@@ -176,6 +176,7 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
   ctx.long_term_ref_pics_present_flag = sps_.long_term_ref_pics_present_flag;
   ctx.num_long_term_ref_pics_sps = sps_.num_long_term_ref_pics_sps;
   ctx.used_by_curr_pic_lt_sps = sps_.used_by_curr_pic_lt_sps;
+  ctx.lt_ref_pic_poc_lsb_sps = sps_.lt_ref_pic_poc_lsb_sps;
   ctx.short_term_rps = sps_.short_term_rps;
   ctx.dependent_slice_segments_enabled_flag =
       pps_.dependent_slice_segments_enabled_flag;
@@ -212,8 +213,8 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
 
   // Unsupported tools are dropped rather than mis-decoded. A non-flat scaling
   // list needs scaling_list_data (the parser skips it) and an IQ-matrix buffer;
-  // long-term references need their POC bookkeeping. Common HLS HEVC uses
-  // neither. Reference-list modification is now applied (see below).
+  // tiles need the column/row geometry. Common HLS HEVC uses neither.
+  // Reference-list modification and long-term references are now handled below.
   if (sps_.scaling_list_enabled_flag) {
     V4L2WC_LOG(V4L2WC_WARNING)
         << "vaapi-h265: scaling lists unsupported; dropping";
@@ -221,11 +222,6 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
   }
   if (pps_.tiles_enabled_flag) {
     V4L2WC_LOG(V4L2WC_WARNING) << "vaapi-h265: tiles unsupported; dropping";
-    return false;
-  }
-  if (sps_.long_term_ref_pics_present_flag) {
-    V4L2WC_LOG(V4L2WC_WARNING)
-        << "vaapi-h265: long-term references unsupported; dropping";
     return false;
   }
 
@@ -281,6 +277,47 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
     if (sh.current_rps.used_s1[i]) st_curr_after.push_back(find_ref(tpoc));
   }
 
+  // Long-term reference set (clause 8.3.2). Each entry matches a DPB picture by
+  // full POC when a delta-POC-MSB cycle is present, otherwise by POC LSB alone.
+  // Matched long-term pictures are kept in the DPB, and the used ones flagged
+  // LT_CURR; the follow ones are held for a later picture.
+  const int max_poc_lsb = 1 << sps_.log2_max_pic_order_cnt_lsb;
+  std::vector<RpsEntry> lt_curr;
+  std::vector<std::uint32_t> lt_slots;
+  const std::uint32_t num_long_term =
+      sh.num_long_term_sps + sh.num_long_term_pics;
+  for (std::uint32_t i = 0; i < num_long_term && i < h265::kMaxLongTermTotal;
+       ++i) {
+    const h265::LongTermRef& lt = sh.long_term_refs[i];
+    RpsEntry e{0, 0, false};
+    if (lt.delta_poc_msb_present) {
+      const std::int64_t poc_lt =
+          static_cast<std::int64_t>(lt.poc_lsb) + poc -
+          static_cast<std::int64_t>(lt.delta_poc_msb_cycle) * max_poc_lsb -
+          (poc & (max_poc_lsb - 1));
+      e.poc = static_cast<int>(poc_lt);
+      for (const auto& r : dpb_)
+        if (r.poc == poc_lt) {
+          e.slot = r.slot;
+          e.found = true;
+          break;
+        }
+    } else {
+      for (const auto& r : dpb_)
+        if ((r.poc & (max_poc_lsb - 1)) == static_cast<int>(lt.poc_lsb)) {
+          e.poc = r.poc;
+          e.slot = r.slot;
+          e.found = true;
+          break;
+        }
+    }
+    if (e.found) {
+      kept_pocs.push_back(e.poc);  // keep matched long-term pictures in the DPB
+      lt_slots.push_back(e.slot);
+    }
+    if (lt.used_by_curr) lt_curr.push_back(e);
+  }
+
   // Evict every DPB picture the current set does not keep (marks it unused for
   // reference; its surface frees for reuse).
   {
@@ -334,6 +371,12 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
     for (const auto& e : st_curr_after)
       if (e.found && e.slot == r.slot)
         p.flags |= VA_PICTURE_HEVC_RPS_ST_CURR_AFTER;
+    // A picture matched as long-term for this picture is flagged as such; the
+    // used ones additionally carry LT_CURR.
+    for (std::uint32_t s : lt_slots)
+      if (s == r.slot) p.flags |= VA_PICTURE_HEVC_LONG_TERM_REFERENCE;
+    for (const auto& e : lt_curr)
+      if (e.found && e.slot == r.slot) p.flags |= VA_PICTURE_HEVC_RPS_LT_CURR;
     if (r.slot < 64) ref_index_by_slot[r.slot] = num_ref;
     ++num_ref;
   }
@@ -478,17 +521,19 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
     }
   };
   if (is_p || is_b) {
-    // L0: StCurrBefore, then StCurrAfter.
+    // L0: StCurrBefore, StCurrAfter, then LtCurr.
     std::vector<std::uint8_t> temp0;
     for (const auto& e : st_curr_before) temp0.push_back(ref_of(e));
     for (const auto& e : st_curr_after) temp0.push_back(ref_of(e));
+    for (const auto& e : lt_curr) temp0.push_back(ref_of(e));
     build_list(temp0, sh.ref_pic_list_modification_flag_l0, sh.list_entry_l0,
                sh.num_ref_idx_l0_active_minus1, sp.RefPicList[0]);
     if (is_b) {
-      // L1: StCurrAfter, then StCurrBefore.
+      // L1: StCurrAfter, StCurrBefore, then LtCurr.
       std::vector<std::uint8_t> temp1;
       for (const auto& e : st_curr_after) temp1.push_back(ref_of(e));
       for (const auto& e : st_curr_before) temp1.push_back(ref_of(e));
+      for (const auto& e : lt_curr) temp1.push_back(ref_of(e));
       build_list(temp1, sh.ref_pic_list_modification_flag_l1, sh.list_entry_l1,
                  sh.num_ref_idx_l1_active_minus1, sp.RefPicList[1]);
     }
