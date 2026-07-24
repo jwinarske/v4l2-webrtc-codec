@@ -110,6 +110,7 @@ class VaapiH265Decoder : public IDmaDecoder {
   bool configured_ = false;
   std::uint32_t coded_w_ = 0, coded_h_ = 0;
   std::uint32_t coded_bit_depth_ = 8;  // 8 (Main) or 10 (Main 10)
+  bool is_rext_ = false;  // 4:2:2 / 4:4:4: send the Extension VA buffers
   std::uint32_t pool_size_ = 0;
 
   h265::Sps sps_{};

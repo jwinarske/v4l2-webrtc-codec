@@ -74,14 +74,60 @@ VaapiH265Decoder::~VaapiH265Decoder() {
   if (drm_fd_ >= 0) ::close(drm_fd_);
 }
 
+namespace {
+
+// Picks the VAAPI profile, RT format, and surface fourcc for a chroma format
+// and bit depth. Range-extension profiles (4:2:2 / 4:4:4) also need the
+// Extension picture/slice buffers, flagged via `is_rext`. Returns false for a
+// format this engine does not configure (12-bit and higher, monochrome).
+struct FormatSelection {
+  VAProfile profile;
+  unsigned rt_format;
+  unsigned fourcc;
+  bool is_rext;
+};
+bool SelectFormat(uint32_t chroma_format_idc, uint32_t bit_depth,
+                  FormatSelection* out) {
+  const bool b10 = bit_depth == 10;
+  if (bit_depth != 8 && bit_depth != 10) {
+    return false;
+  }
+  switch (chroma_format_idc) {
+    case 1:  // 4:2:0 -- Main / Main 10, base buffers
+      *out = {b10 ? VAProfileHEVCMain10 : VAProfileHEVCMain,
+              static_cast<unsigned>(b10 ? VA_RT_FORMAT_YUV420_10
+                                        : VA_RT_FORMAT_YUV420),
+              static_cast<unsigned>(b10 ? VA_FOURCC_P010 : VA_FOURCC_NV12),
+              false};
+      return true;
+    case 2:  // 4:2:2 -- Main 4:2:2 10 covers 8-bit and 10-bit
+      *out = {VAProfileHEVCMain422_10,
+              static_cast<unsigned>(b10 ? VA_RT_FORMAT_YUV422_10
+                                        : VA_RT_FORMAT_YUV422),
+              static_cast<unsigned>(b10 ? VA_FOURCC_Y210 : VA_FOURCC_YUY2),
+              true};
+      return true;
+    case 3:  // 4:4:4
+      *out = {b10 ? VAProfileHEVCMain444_10 : VAProfileHEVCMain444,
+              static_cast<unsigned>(b10 ? VA_RT_FORMAT_YUV444_10
+                                        : VA_RT_FORMAT_YUV444),
+              static_cast<unsigned>(b10 ? VA_FOURCC_Y410 : VA_FOURCC_444P),
+              true};
+      return true;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
 bool VaapiH265Decoder::EnsureConfigured(const h265::Sps& sps) {
   if (configured_) return true;
-  // Main and Main 10 are 4:2:0, 8-bit or 10-bit. Anything else (4:2:2 / 4:4:4,
-  // higher bit depth) needs a different profile and surface format than this
-  // engine sets up.
-  if (sps.chroma_format_idc != 1 ||
-      (sps.bit_depth_luma != 8 && sps.bit_depth_luma != 10) ||
-      sps.bit_depth_chroma != sps.bit_depth_luma) {
+  // 4:2:0 / 4:2:2 / 4:4:4 at 8-bit or 10-bit. Higher bit depths and monochrome
+  // are not configured here.
+  FormatSelection fmt;
+  if (sps.bit_depth_chroma != sps.bit_depth_luma ||
+      !SelectFormat(sps.chroma_format_idc, sps.bit_depth_luma, &fmt)) {
     V4L2WC_LOG(V4L2WC_WARNING)
         << "vaapi-h265: unsupported format (chroma_format_idc="
         << sps.chroma_format_idc << " bit_depth=" << sps.bit_depth_luma << ")";
@@ -90,11 +136,10 @@ bool VaapiH265Decoder::EnsureConfigured(const h265::Sps& sps) {
   coded_w_ = sps.pic_width_in_luma_samples;
   coded_h_ = sps.pic_height_in_luma_samples;
   coded_bit_depth_ = sps.bit_depth_luma;
-  const bool is_10bit = sps.bit_depth_luma == 10;
-  const VAProfile profile = is_10bit ? VAProfileHEVCMain10 : VAProfileHEVCMain;
-  const unsigned rt_format =
-      is_10bit ? VA_RT_FORMAT_YUV420_10 : VA_RT_FORMAT_YUV420;
-  const unsigned fourcc = is_10bit ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+  is_rext_ = fmt.is_rext;
+  const VAProfile profile = fmt.profile;
+  const unsigned rt_format = fmt.rt_format;
+  const unsigned fourcc = fmt.fourcc;
 
   VAConfigAttrib attr = {VAConfigAttribRTFormat, rt_format};
   VAConfigID cfg = 0;
@@ -221,6 +266,8 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
   ctx.lists_modification_present_flag = pps_.lists_modification_present_flag;
   ctx.slice_segment_header_extension_present_flag =
       pps_.slice_segment_header_extension_present_flag;
+  ctx.chroma_qp_offset_list_enabled_flag =
+      pps_.range_extension.chroma_qp_offset_list_enabled_flag;
 
   h265::SliceHeader sh{};
   if (!h265::ParseSliceHeader(nal.rbsp.data(), nal.rbsp.size(), nal.type, ctx,
@@ -692,6 +739,68 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
                 sizeof(iq.ScalingListDC32x32));
   }
 
+  // Range-extension profiles (4:2:2 / 4:4:4) take the Extension picture and
+  // slice buffers: the base struct plus a range-extension struct. The base is
+  // the pp / sp already built; the range-extension fields come from the parsed
+  // SPS/PPS/slice range extensions.
+  VAPictureParameterBufferHEVCExtension pp_ext{};
+  VASliceParameterBufferHEVCExtension sp_ext{};
+  if (is_rext_) {
+    pp_ext.base = pp;
+    auto& rf = pp_ext.rext.range_extension_pic_fields.bits;
+    const auto& sx = sps_.range_extension;
+    const auto& px = pps_.range_extension;
+    rf.transform_skip_rotation_enabled_flag =
+        sx.transform_skip_rotation_enabled_flag;
+    rf.transform_skip_context_enabled_flag =
+        sx.transform_skip_context_enabled_flag;
+    rf.implicit_rdpcm_enabled_flag = sx.implicit_rdpcm_enabled_flag;
+    rf.explicit_rdpcm_enabled_flag = sx.explicit_rdpcm_enabled_flag;
+    rf.extended_precision_processing_flag =
+        sx.extended_precision_processing_flag;
+    rf.intra_smoothing_disabled_flag = sx.intra_smoothing_disabled_flag;
+    rf.high_precision_offsets_enabled_flag =
+        sx.high_precision_offsets_enabled_flag;
+    rf.persistent_rice_adaptation_enabled_flag =
+        sx.persistent_rice_adaptation_enabled_flag;
+    rf.cabac_bypass_alignment_enabled_flag =
+        sx.cabac_bypass_alignment_enabled_flag;
+    rf.cross_component_prediction_enabled_flag =
+        px.cross_component_prediction_enabled_flag;
+    rf.chroma_qp_offset_list_enabled_flag =
+        px.chroma_qp_offset_list_enabled_flag;
+    pp_ext.rext.diff_cu_chroma_qp_offset_depth =
+        static_cast<std::uint8_t>(px.diff_cu_chroma_qp_offset_depth);
+    pp_ext.rext.chroma_qp_offset_list_len_minus1 =
+        static_cast<std::uint8_t>(px.chroma_qp_offset_list_len_minus1);
+    pp_ext.rext.log2_sao_offset_scale_luma =
+        static_cast<std::uint8_t>(px.log2_sao_offset_scale_luma);
+    pp_ext.rext.log2_sao_offset_scale_chroma =
+        static_cast<std::uint8_t>(px.log2_sao_offset_scale_chroma);
+    pp_ext.rext.log2_max_transform_skip_block_size_minus2 =
+        static_cast<std::uint8_t>(px.log2_max_transform_skip_block_size - 2);
+    for (int i = 0; i < 6; ++i) {
+      pp_ext.rext.cb_qp_offset_list[i] =
+          static_cast<std::int8_t>(px.cb_qp_offset_list[i]);
+      pp_ext.rext.cr_qp_offset_list[i] =
+          static_cast<std::int8_t>(px.cr_qp_offset_list[i]);
+    }
+
+    sp_ext.base = sp;
+    sp_ext.rext.slice_ext_flags.bits.cu_chroma_qp_offset_enabled_flag =
+        sh.cu_chroma_qp_offset_enabled_flag;
+    // The wider (int16) weighted-prediction offsets mirror the base int8 ones;
+    // they carry the full range when high_precision_offsets is set.
+    for (int i = 0; i < 15; ++i) {
+      sp_ext.rext.luma_offset_l0[i] = sp.luma_offset_l0[i];
+      sp_ext.rext.luma_offset_l1[i] = sp.luma_offset_l1[i];
+      for (int j = 0; j < 2; ++j) {
+        sp_ext.rext.ChromaOffsetL0[i][j] = sp.ChromaOffsetL0[i][j];
+        sp_ext.rext.ChromaOffsetL1[i][j] = sp.ChromaOffsetL1[i][j];
+      }
+    }
+  }
+
   VABufferID b_pp = 0, b_sp = 0, b_sd = 0, b_iq = 0;
   auto ck = [&](VAStatus s, const char* what) {
     if (s != VA_STATUS_SUCCESS)
@@ -699,11 +808,17 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
           << "vaapi-h265: " << what << ": " << va_.ErrorStr(s);
     return s == VA_STATUS_SUCCESS;
   };
-  if (!ck(va_.CreateBuffer(dpy_, context_, VAPictureParameterBufferType,
-                           sizeof(pp), 1, &pp, &b_pp),
+  if (!ck(va_.CreateBuffer(
+              dpy_, context_, VAPictureParameterBufferType,
+              is_rext_ ? sizeof(pp_ext) : sizeof(pp), 1,
+              is_rext_ ? static_cast<void*>(&pp_ext) : static_cast<void*>(&pp),
+              &b_pp),
           "pic buf") ||
-      !ck(va_.CreateBuffer(dpy_, context_, VASliceParameterBufferType,
-                           sizeof(sp), 1, &sp, &b_sp),
+      !ck(va_.CreateBuffer(
+              dpy_, context_, VASliceParameterBufferType,
+              is_rext_ ? sizeof(sp_ext) : sizeof(sp), 1,
+              is_rext_ ? static_cast<void*>(&sp_ext) : static_cast<void*>(&sp),
+              &b_sp),
           "slice buf") ||
       !ck(va_.CreateBuffer(dpy_, context_, VASliceDataBufferType,
                            static_cast<unsigned>(nal.raw.size()), 1,
