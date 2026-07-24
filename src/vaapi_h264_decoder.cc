@@ -454,4 +454,20 @@ void VaapiH264Decoder::Release(std::uint32_t slot) {
   // by DPB eviction clearing is_reference).
 }
 
+void VaapiH264Decoder::Flush() {
+  // Drop every reference and forget the pending frame, which is what an IDR
+  // does mid-stream. Surfaces a consumer still holds stay checked out until it
+  // releases them; everything else is free for the post-seek keyframe. The
+  // decoder stays configured, so no VAAPI resources are torn down.
+  for (auto& r : dpb_) slots_[r.slot].is_reference = false;
+  dpb_.clear();
+  have_ready_ = false;
+}
+
+void VaapiH264Decoder::Drain() {
+  // VAAPI decodes synchronously: every submitted access unit has already
+  // produced its frame by the time Drive() returns, so nothing is held back
+  // and there is nothing to flush out.
+}
+
 }  // namespace v4l2wc

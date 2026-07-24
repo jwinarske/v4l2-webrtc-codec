@@ -510,6 +510,23 @@ bool V4l2M2mDecoder::Acquire(V4l2DmaFrame* out) {
   return true;
 }
 
+bool V4l2M2mDecoder::QueueCaptureBuffer(std::uint32_t index) {
+  v4l2_buffer buf{};
+  v4l2_plane planes[VIDEO_MAX_PLANES]{};
+  buf.type = CaptureType(mplane_);
+  buf.memory = V4L2_MEMORY_MMAP;
+  buf.index = index;
+  if (mplane_) {
+    buf.length = 1;
+    buf.m.planes = planes;
+  }
+  if (xioctl(fd_, VIDIOC_QBUF, &buf) != 0) {
+    return false;
+  }
+  capture_buffers_[index].queued = true;
+  return true;
+}
+
 void V4l2M2mDecoder::Release(std::uint32_t capture_index) {
   if (capture_index >= capture_buffers_.size()) {
     return;
@@ -517,18 +534,55 @@ void V4l2M2mDecoder::Release(std::uint32_t capture_index) {
   if (capture_buffers_[capture_index].queued) {
     return;  // already back with the decoder
   }
-  v4l2_buffer buf{};
-  v4l2_plane planes[VIDEO_MAX_PLANES]{};
-  buf.type = CaptureType(mplane_);
-  buf.memory = V4L2_MEMORY_MMAP;
-  buf.index = capture_index;
-  if (mplane_) {
-    buf.length = 1;
-    buf.m.planes = planes;
+  QueueCaptureBuffer(capture_index);
+}
+
+void V4l2M2mDecoder::Flush() {
+  // Stop both queues: the driver drops every queued access unit and every
+  // decoded frame. STREAMOFF on a queue that is not streaming is harmless.
+  if (output_streaming_) {
+    StreamOff(fd_, OutputType(mplane_));
+    output_streaming_ = false;
   }
-  if (xioctl(fd_, VIDIOC_QBUF, &buf) == 0) {
-    capture_buffers_[capture_index].queued = true;
+  if (capture_streaming_) {
+    StreamOff(fd_, CaptureType(mplane_));
+    capture_streaming_ = false;
   }
+  have_ready_ = false;
+
+  // Every OUTPUT buffer is free again, and the queue restarts so the next
+  // access unit can be submitted.
+  output_free_.clear();
+  for (std::uint32_t i = 0; i < output_buffers_.size(); ++i) {
+    output_free_.push_back(i);
+  }
+  if (!output_buffers_.empty() && StreamOn(fd_, OutputType(mplane_))) {
+    output_streaming_ = true;
+  }
+
+  // If CAPTURE was already configured, requeue its buffers and restart it. A
+  // seek that also changes geometry is handled by the caller recreating the
+  // decoder, so the buffers here still fit the stream.
+  if (!capture_buffers_.empty()) {
+    for (auto& cb : capture_buffers_) {
+      cb.queued = false;
+    }
+    for (std::uint32_t i = 0; i < capture_buffers_.size(); ++i) {
+      QueueCaptureBuffer(i);
+    }
+    if (StreamOn(fd_, CaptureType(mplane_))) {
+      capture_streaming_ = true;
+    }
+  }
+}
+
+void V4l2M2mDecoder::Drain() {
+  // Tell the stateful decoder there is no more input, so it emits the frames
+  // it still holds; Drive()/Acquire() then pump them out. Best effort: a
+  // driver that does not implement the command simply ignores it.
+  v4l2_decoder_cmd cmd{};
+  cmd.cmd = V4L2_DEC_CMD_STOP;
+  xioctl(fd_, VIDIOC_DECODER_CMD, &cmd);
 }
 
 }  // namespace v4l2wc

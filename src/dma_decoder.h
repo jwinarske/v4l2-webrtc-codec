@@ -68,6 +68,21 @@ class IDmaDecoder {
   // Return a previously acquired frame's capture slot for reuse.
   virtual void Release(std::uint32_t capture_index) = 0;
 
+  // Discard all pending input and buffered output and return to a state ready
+  // to decode a fresh access unit. This is the seek and stream-reset path,
+  // which WebRTC never needed. The caller must Release() any acquired frame
+  // first; nothing new is produced until the next SubmitBitstream(), which is
+  // expected to carry a keyframe. A seek that also changes geometry is instead
+  // handled by recreating the decoder, as SubmitResult::kSourceChange already
+  // requires.
+  virtual void Flush() = 0;
+
+  // Signal end of stream so the engine emits whatever it still holds. After a
+  // Drain(), Drive() and Acquire() pump out the remaining frames; a later
+  // SubmitBitstream() resumes normal decoding. A synchronous engine has
+  // nothing pending and may treat this as a no-op.
+  virtual void Drain() = 0;
+
   // How many buffers the engine decodes into, or 0 before the pool exists.
   // Passed on to consumers so they can bound what they hold: a consumer that
   // holds a large fraction of the pool starves the decoder waiting for a
