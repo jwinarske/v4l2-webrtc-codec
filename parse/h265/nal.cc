@@ -23,6 +23,11 @@ bool IsIdr(NalUnitType type) {
   return type == NalUnitType::kIdrWRadl || type == NalUnitType::kIdrNLp;
 }
 
+bool IsBla(NalUnitType type) {
+  const uint8_t t = static_cast<uint8_t>(type);
+  return t >= 16 && t <= 18;  // BLA_W_LP .. BLA_N_LP
+}
+
 namespace {
 
 // Removes emulation-prevention bytes: 0x03 in a `0x00 0x00 0x03` sequence

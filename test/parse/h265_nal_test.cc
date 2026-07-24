@@ -10,6 +10,7 @@
 
 #include "parse/h265/nal.h"
 
+using v4l2wc::h265::IsBla;
 using v4l2wc::h265::IsIdr;
 using v4l2wc::h265::IsIrap;
 using v4l2wc::h265::IsVcl;
@@ -138,6 +139,11 @@ int main() {
   CHECK(IsIdr(NalUnitType::kIdrWRadl));
   CHECK(IsIdr(NalUnitType::kIdrNLp));
   CHECK(!IsIdr(NalUnitType::kCraNut));
+  CHECK(IsBla(NalUnitType::kBlaWLp));
+  CHECK(IsBla(NalUnitType::kBlaWRadl));
+  CHECK(IsBla(NalUnitType::kBlaNLp));
+  CHECK(!IsBla(NalUnitType::kIdrWRadl));
+  CHECK(!IsBla(NalUnitType::kCraNut));  // CRA is an IRAP but not a BLA
 
   // RbspToRawBitOffset accounts for the two header bytes and any emulation
   // byte before the offset. Payload 00 00 03 01 55 -> RBSP 00 00 01 55, so the

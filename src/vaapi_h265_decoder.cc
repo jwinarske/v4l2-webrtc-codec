@@ -189,16 +189,13 @@ int VaapiH265Decoder::PickFreeSlot() {
 }
 
 int VaapiH265Decoder::ComputePoc(const h265::SliceHeader& sh,
-                                 const h265::Nal& nal) {
+                                 const h265::Nal& nal, bool no_rasl_output) {
   const int max_poc_lsb = 1 << sps_.log2_max_pic_order_cnt_lsb;
   const int poc_lsb = static_cast<int>(sh.slice_pic_order_cnt_lsb);
-  const bool irap = h265::IsIrap(nal.type);
-  // NoRaslOutputFlag is 1 for an IDR and for the first IRAP in the stream (a
-  // clean random-access point), where the POC MSB resets to 0. A later CRA
-  // keeps its leading pictures and uses the normal derivation. BLA, which would
-  // also reset, is treated as a plain IRAP here.
-  const bool no_rasl_output =
-      h265::IsIdr(nal.type) || (irap && !seen_first_picture_);
+  // When the picture is an IRAP that starts a new coded video sequence
+  // (NoRaslOutputFlag = 1: an IDR, a BLA, or the first CRA / the first IRAP
+  // after an end-of-sequence), the POC MSB resets to 0; otherwise it is derived
+  // from the previous anchor.
   int poc_msb = 0;
   if (!no_rasl_output) {
     if (poc_lsb < prev_poc_lsb_ && (prev_poc_lsb_ - poc_lsb) >= max_poc_lsb / 2)
@@ -298,10 +295,20 @@ bool VaapiH265Decoder::DecodePicture(
     return false;
   }
 
-  const int poc = ComputePoc(sh, nal);
+  // NoRaslOutputFlag (clause 8.1.3): the picture starts a new coded video
+  // sequence, so the POC MSB resets and the earlier references are gone. True
+  // for an IDR, a BLA, the first picture in the stream, and the first IRAP
+  // after an end-of-sequence NAL.
+  const bool no_rasl_output =
+      h265::IsIdr(nal.type) || h265::IsBla(nal.type) ||
+      (h265::IsIrap(nal.type) && (!seen_first_picture_ || eos_seen_));
+  eos_seen_ = false;  // consumed by this picture
 
-  // An IDR clears the DPB before its own reference-picture set is applied.
-  if (h265::IsIdr(nal.type)) {
+  const int poc = ComputePoc(sh, nal, no_rasl_output);
+
+  // A clean random-access point (IDR, BLA, or a CRA that starts a new sequence)
+  // empties the DPB before its own reference-picture set is applied.
+  if (h265::IsIrap(nal.type) && no_rasl_output) {
     for (auto& r : dpb_) slots_[r.slot].is_reference = false;
     dpb_.clear();
   }
@@ -926,6 +933,11 @@ SubmitResult VaapiH265Decoder::SubmitBitstream(const std::uint8_t* data,
         pps_ = p;
         have_pps_ = true;
       }
+    } else if (n.type == h265::NalUnitType::kEosNut ||
+               n.type == h265::NalUnitType::kEobNut) {
+      // End of sequence / bitstream: the next IRAP starts a new coded video
+      // sequence (NoRaslOutputFlag = 1).
+      eos_seen_ = true;
     } else if (h265::IsVcl(n.type) && have_sps_ && have_pps_) {
       vcl.push_back(&n);
     }
@@ -1027,6 +1039,7 @@ void VaapiH265Decoder::Flush() {
   prev_poc_lsb_ = 0;
   prev_poc_msb_ = 0;
   seen_first_picture_ = false;
+  eos_seen_ = false;
   have_ready_ = false;
 }
 

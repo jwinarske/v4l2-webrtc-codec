@@ -60,6 +60,9 @@ enum class NalUnitType : uint8_t {
 [[nodiscard]] bool IsIrap(NalUnitType type);
 // An IDR specifically, which resets the decoded-picture buffer.
 [[nodiscard]] bool IsIdr(NalUnitType type);
+// A BLA (broken-link access) picture. Like an IDR it starts a new coded video
+// sequence, so NoRaslOutputFlag is 1 and the POC MSB resets.
+[[nodiscard]] bool IsBla(NalUnitType type);
 
 struct Nal {
   Nal();

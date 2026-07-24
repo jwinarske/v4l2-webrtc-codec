@@ -76,7 +76,8 @@ class VaapiH265Decoder : public IDmaDecoder {
   // Decodes one coded picture: its VCL NALs in order (the first has
   // first_slice_segment_in_pic_flag set). A picture may carry multiple slices.
   bool DecodePicture(const std::vector<const h265::Nal*>& slices);
-  int ComputePoc(const h265::SliceHeader& sh, const h265::Nal& nal);
+  int ComputePoc(const h265::SliceHeader& sh, const h265::Nal& nal,
+                 bool no_rasl_output);
   int PickFreeSlot();
   void ExportSlot(std::uint32_t slot, std::uint64_t timestamp);
 
@@ -127,6 +128,9 @@ class VaapiH265Decoder : public IDmaDecoder {
   int prev_poc_lsb_ = 0;
   int prev_poc_msb_ = 0;
   bool seen_first_picture_ = false;
+  // An end-of-sequence / end-of-bitstream NAL was seen; the next IRAP starts a
+  // new coded video sequence (NoRaslOutputFlag = 1), so its POC MSB resets.
+  bool eos_seen_ = false;
 
   bool have_ready_ = false;
   std::uint32_t ready_slot_ = 0;
