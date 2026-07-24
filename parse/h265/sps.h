@@ -18,7 +18,11 @@
 #include <cstdint>
 #include <vector>
 
+#include "parse/bit_reader.h"
+
 namespace v4l2wc::h265 {
+
+using v4l2wc::BitReader;
 
 // Largest coded luma dimension accepted; anything larger is treated as
 // malformed. HEVC level 6.2 tops out well under this.
@@ -98,6 +102,18 @@ struct Sps {
 // already removed — e.g. Nal::rbsp). Returns true and fills *out on success,
 // false on malformed or out-of-range input.
 bool ParseSps(const uint8_t* rbsp, size_t size, Sps* out);
+
+// Parses one st_ref_pic_set (clause 7.3.7) at index `st_rps_idx` and derives
+// its negative/positive delta-POC lists into *out. `sets` holds the already
+// parsed sets (0..st_rps_idx-1); `num_short_term_rps` is the SPS count, used to
+// detect the slice-header case (st_rps_idx == num_short_term_rps) where the
+// reference set is chosen by delta_idx_minus1 rather than being the immediately
+// preceding set. Shared by the SPS parser and the slice-segment header parser.
+// Returns false on malformed input or an out-of-range reference index.
+bool ParseShortTermRps(BitReader* br, uint32_t st_rps_idx,
+                       uint32_t num_short_term_rps,
+                       const std::vector<ShortTermRps>& sets,
+                       ShortTermRps* out);
 
 }  // namespace v4l2wc::h265
 

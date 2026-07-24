@@ -103,11 +103,16 @@ bool SkipScalingListData(BitReader* br) {
   return true;
 }
 
-// st_ref_pic_set (clause 7.3.7) for an SPS-defined set (st_rps_idx <
-// num_short_term_ref_pic_sets, so delta_idx_minus1 is never present and the
-// reference set is the immediately preceding one). `sets` holds the already
-// parsed sets 0..st_rps_idx-1. Derives the negative/positive delta-POC lists.
+}  // namespace
+
+// st_ref_pic_set (clause 7.3.7). For an SPS-defined set (st_rps_idx <
+// num_short_term_rps) delta_idx_minus1 is absent and the reference set is the
+// immediately preceding one; for the slice-header set (st_rps_idx ==
+// num_short_term_rps) delta_idx_minus1 selects the reference set. `sets` holds
+// the already parsed sets 0..st_rps_idx-1. Derives the negative/positive
+// delta-POC lists.
 bool ParseShortTermRps(BitReader* br, uint32_t st_rps_idx,
+                       uint32_t num_short_term_rps,
                        const std::vector<ShortTermRps>& sets,
                        ShortTermRps* out) {
   bool inter_pred = false;
@@ -116,7 +121,20 @@ bool ParseShortTermRps(BitReader* br, uint32_t st_rps_idx,
   }
 
   if (inter_pred) {
-    const ShortTermRps& ref = sets[st_rps_idx - 1];
+    uint32_t delta_idx_minus1 = 0;
+    if (st_rps_idx == num_short_term_rps && !br->ReadUe(&delta_idx_minus1)) {
+      return false;
+    }
+    // RefRpsIdx = st_rps_idx - (delta_idx_minus1 + 1); it must index an already
+    // parsed set.
+    if (delta_idx_minus1 + 1 > st_rps_idx) {
+      return false;
+    }
+    const uint32_t ref_rps_idx = st_rps_idx - (delta_idx_minus1 + 1);
+    if (ref_rps_idx >= sets.size()) {
+      return false;
+    }
+    const ShortTermRps& ref = sets[ref_rps_idx];
     bool delta_rps_sign = false;
     uint32_t abs_delta_rps_minus1 = 0;
     if (!br->ReadFlag(&delta_rps_sign) || !br->ReadUe(&abs_delta_rps_minus1)) {
@@ -263,8 +281,6 @@ bool ParseShortTermRps(BitReader* br, uint32_t st_rps_idx,
   }
   return true;
 }
-
-}  // namespace
 
 bool ParseSps(const uint8_t* rbsp, size_t size, Sps* out) {
   if (rbsp == nullptr || out == nullptr) {
@@ -434,7 +450,8 @@ bool ParseSps(const uint8_t* rbsp, size_t size, Sps* out) {
   sps.short_term_rps.reserve(num_short_term_rps);
   for (uint32_t i = 0; i < num_short_term_rps; ++i) {
     ShortTermRps rps;
-    if (!ParseShortTermRps(&br, i, sps.short_term_rps, &rps)) {
+    if (!ParseShortTermRps(&br, i, num_short_term_rps, sps.short_term_rps,
+                           &rps)) {
       return false;
     }
     sps.short_term_rps.push_back(rps);
