@@ -211,17 +211,20 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
     return false;
   }
 
-  // Unsupported tools are dropped rather than mis-decoded. A non-flat scaling
-  // list needs scaling_list_data (the parser skips it) and an IQ-matrix buffer;
-  // tiles need the column/row geometry. Common HLS HEVC uses neither.
-  // Reference-list modification and long-term references are now handled below.
+  // A non-flat scaling list needs scaling_list_data (the parser skips it) and
+  // an IQ-matrix buffer, which is not built yet; common HLS HEVC keeps this
+  // off.
   if (sps_.scaling_list_enabled_flag) {
     V4L2WC_LOG(V4L2WC_WARNING)
         << "vaapi-h265: scaling lists unsupported; dropping";
     return false;
   }
-  if (pps_.tiles_enabled_flag) {
-    V4L2WC_LOG(V4L2WC_WARNING) << "vaapi-h265: tiles unsupported; dropping";
+  // The VA picture buffer holds column_width_minus1[19] /
+  // row_height_minus1[21], so more tiles than that cannot be described; drop
+  // rather than overflow.
+  if (pps_.tiles_enabled_flag &&
+      (pps_.num_tile_columns_minus1 >= 19 || pps_.num_tile_rows_minus1 >= 21)) {
+    V4L2WC_LOG(V4L2WC_WARNING) << "vaapi-h265: too many tiles; dropping";
     return false;
   }
 
@@ -441,6 +444,46 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
       static_cast<std::uint8_t>(pps_.num_tile_columns_minus1);
   pp.num_tile_rows_minus1 =
       static_cast<std::uint8_t>(pps_.num_tile_rows_minus1);
+
+  // The VA picture buffer wants the full tile grid in CTBs even for uniform
+  // spacing. Uniform widths are derived (clause 6.5.1); explicit widths come
+  // from the PPS with the last column/row derived from the remaining CTBs.
+  if (pps_.tiles_enabled_flag) {
+    const std::uint32_t ncols = pps_.num_tile_columns_minus1 + 1;
+    const std::uint32_t nrows = pps_.num_tile_rows_minus1 + 1;
+    const std::uint32_t w = sps_.pic_width_in_ctbs;
+    const std::uint32_t h = sps_.pic_height_in_ctbs;
+    if (pps_.uniform_spacing_flag) {
+      for (std::uint32_t i = 0; i < ncols && i < 19; ++i)
+        pp.column_width_minus1[i] =
+            static_cast<std::uint16_t>((i + 1) * w / ncols - i * w / ncols - 1);
+      for (std::uint32_t i = 0; i < nrows && i < 21; ++i)
+        pp.row_height_minus1[i] =
+            static_cast<std::uint16_t>((i + 1) * h / nrows - i * h / nrows - 1);
+    } else {
+      std::uint32_t used = 0;
+      for (std::uint32_t i = 0; i + 1 < ncols && i < 19; ++i) {
+        const std::uint32_t cw = i < pps_.column_width_minus1.size()
+                                     ? pps_.column_width_minus1[i]
+                                     : 0;
+        pp.column_width_minus1[i] = static_cast<std::uint16_t>(cw);
+        used += cw + 1;
+      }
+      if (ncols >= 1 && ncols - 1 < 19)  // last column: the remaining CTBs
+        pp.column_width_minus1[ncols - 1] =
+            static_cast<std::uint16_t>(w > used ? w - used - 1 : 0);
+      used = 0;
+      for (std::uint32_t i = 0; i + 1 < nrows && i < 21; ++i) {
+        const std::uint32_t rh =
+            i < pps_.row_height_minus1.size() ? pps_.row_height_minus1[i] : 0;
+        pp.row_height_minus1[i] = static_cast<std::uint16_t>(rh);
+        used += rh + 1;
+      }
+      if (nrows >= 1 && nrows - 1 < 21)
+        pp.row_height_minus1[nrows - 1] =
+            static_cast<std::uint16_t>(h > used ? h - used - 1 : 0);
+    }
+  }
 
   pp.slice_parsing_fields.bits.lists_modification_present_flag =
       pps_.lists_modification_present_flag;
