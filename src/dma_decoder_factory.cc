@@ -1,0 +1,62 @@
+// SPDX-FileCopyrightText: 2026 Joel Winarske
+// SPDX-License-Identifier: MIT
+
+#include "src/dma_decoder_factory.h"
+
+#include <linux/videodev2.h>
+
+#include <algorithm>
+#include <cstddef>
+
+#include "src/log.h"
+#include "src/v4l2_m2m_decoder.h"
+#if V4L2WC_HAVE_VAAPI
+#include "src/vaapi_h264_decoder.h"
+#endif
+
+namespace v4l2wc {
+
+std::unique_ptr<IDmaDecoder> CreateDmaDecoder(const DmaDecoderConfig& config) {
+  const char* device = (config.v4l2_device != nullptr && config.v4l2_device[0])
+                           ? config.v4l2_device
+                           : "/dev/video10";
+
+  // OUTPUT holds one coded access unit. The luma size is not a safe bound -- a
+  // high-bitrate keyframe exceeds it -- so it is floored at 1 MiB, which
+  // comfortably holds an SD/HD frame.
+  const std::size_t output_buffer_size = std::max<std::size_t>(
+      static_cast<std::size_t>(config.coded_width) * config.coded_height,
+      std::size_t{1} << 20);
+
+  // The V4L2 M2M stateful engine first: the embedded path.
+  if (auto v4l2 = V4l2M2mDecoder::Create(
+          device, config.codec_fourcc, V4L2_PIX_FMT_NV12, config.coded_width,
+          config.coded_height, /*output_buffer_count=*/4,
+          /*capture_buffer_count=*/16, output_buffer_size)) {
+    V4L2WC_LOG(V4L2WC_INFO) << "v4l2wc: V4L2 M2M decoder on " << device << " "
+                            << config.coded_width << "x" << config.coded_height;
+    return v4l2;
+  }
+
+#if V4L2WC_HAVE_VAAPI
+  // VAAPI second: the desktop path. Only H.264 is implemented there. The pool
+  // covers the maximum DPB plus frames in flight to the compositor.
+  if (config.codec_fourcc == V4L2_PIX_FMT_H264) {
+    const char* node =
+        (config.vaapi_render_node != nullptr && config.vaapi_render_node[0])
+            ? config.vaapi_render_node
+            : "/dev/dri/renderD128";
+    if (auto vaapi = VaapiH264Decoder::Create(node, /*pool_size=*/28)) {
+      V4L2WC_LOG(V4L2WC_INFO) << "v4l2wc: VAAPI decoder " << config.coded_width
+                              << "x" << config.coded_height;
+      return vaapi;
+    }
+  }
+#endif
+
+  V4L2WC_LOG(V4L2WC_ERROR) << "v4l2wc: no decode engine available for "
+                           << config.coded_width << "x" << config.coded_height;
+  return nullptr;
+}
+
+}  // namespace v4l2wc
