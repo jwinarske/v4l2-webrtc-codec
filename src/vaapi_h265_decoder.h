@@ -8,10 +8,12 @@
 // libva is loaded at runtime (dlopen), so a single libwebrtc.so serves the Pi
 // (V4L2), AMD H.264, and AMD HEVC paths without a libva link dependency.
 //
-// This first stage decodes intra pictures (IDR / CRA / BLA and I slices); the
-// inter-prediction path -- POC derivation, the reference-picture-set to DPB
-// mapping, and the reference lists for P / B slices -- is built on top of the
-// picture-parameter machinery here in a follow-up.
+// It decodes intra pictures (IDR / CRA / BLA) and inter pictures (P / B) for
+// the common HEVC Main streams a HLS packager produces: POC is derived per
+// clause 8.3.1, the short-term reference-picture set is mapped to the DPB per
+// 8.3.2, and the reference lists are built per 8.3.4. Long-term references,
+// reference-list modification, tiles, and scaling lists are not supported yet;
+// a slice needing one is dropped with a log.
 //
 // NOTE: compiled only when the libva headers are present (V4L2WC_HAVE_VAAPI),
 // alongside the H.264 VAAPI engine.
@@ -72,6 +74,7 @@ class VaapiH265Decoder : public IDmaDecoder {
   VaapiH265Decoder();
   bool EnsureConfigured(const h265::Sps& sps);
   bool DecodeSlice(const h265::Nal& nal);
+  int ComputePoc(const h265::SliceHeader& sh, const h265::Nal& nal);
   int PickFreeSlot();
   void ExportSlot(std::uint32_t slot, std::uint64_t timestamp);
 
@@ -82,6 +85,7 @@ class VaapiH265Decoder : public IDmaDecoder {
     Slot& operator=(const Slot&);
 
     std::uint32_t surface = 0;  // VASurfaceID
+    bool is_reference = false;  // held by the DPB
     bool checked_out = false;   // Acquire'd, awaiting Release
     // exported dma-buf (valid while checked_out)
     int fd = -1;
@@ -91,6 +95,11 @@ class VaapiH265Decoder : public IDmaDecoder {
     std::uint32_t pitches[4] = {0, 0, 0, 0};
     std::uint32_t width = 0, height = 0;
     std::uint64_t timestamp = 0;
+  };
+  // A short-term reference picture currently in the DPB.
+  struct RefPic {
+    std::uint32_t slot;
+    int poc;
   };
 
   va::VaApi va_{};
@@ -107,6 +116,13 @@ class VaapiH265Decoder : public IDmaDecoder {
   bool have_sps_ = false, have_pps_ = false;
 
   std::vector<Slot> slots_;
+  std::vector<RefPic> dpb_;
+
+  // POC derivation state (clause 8.3.1): the LSB and MSB of the previous
+  // picture with TemporalId 0 that is not a RASL / RADL picture.
+  int prev_poc_lsb_ = 0;
+  int prev_poc_msb_ = 0;
+  bool seen_first_picture_ = false;
 
   bool have_ready_ = false;
   std::uint32_t ready_slot_ = 0;

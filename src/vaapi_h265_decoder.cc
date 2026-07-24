@@ -117,11 +117,49 @@ bool VaapiH265Decoder::EnsureConfigured(const h265::Sps& sps) {
 
 int VaapiH265Decoder::PickFreeSlot() {
   for (std::uint32_t i = 0; i < slots_.size(); ++i) {
-    if (slots_[i].checked_out) continue;
+    if (slots_[i].is_reference || slots_[i].checked_out) continue;
     if (have_ready_ && i == ready_slot_) continue;
     return static_cast<int>(i);
   }
   return -1;
+}
+
+int VaapiH265Decoder::ComputePoc(const h265::SliceHeader& sh,
+                                 const h265::Nal& nal) {
+  const int max_poc_lsb = 1 << sps_.log2_max_pic_order_cnt_lsb;
+  const int poc_lsb = static_cast<int>(sh.slice_pic_order_cnt_lsb);
+  const bool irap = h265::IsIrap(nal.type);
+  // NoRaslOutputFlag is 1 for an IDR and for the first IRAP in the stream (a
+  // clean random-access point), where the POC MSB resets to 0. A later CRA
+  // keeps its leading pictures and uses the normal derivation. BLA, which would
+  // also reset, is treated as a plain IRAP here.
+  const bool no_rasl_output =
+      h265::IsIdr(nal.type) || (irap && !seen_first_picture_);
+  int poc_msb = 0;
+  if (!no_rasl_output) {
+    if (poc_lsb < prev_poc_lsb_ && (prev_poc_lsb_ - poc_lsb) >= max_poc_lsb / 2)
+      poc_msb = prev_poc_msb_ + max_poc_lsb;
+    else if (poc_lsb > prev_poc_lsb_ &&
+             (poc_lsb - prev_poc_lsb_) > max_poc_lsb / 2)
+      poc_msb = prev_poc_msb_ - max_poc_lsb;
+    else
+      poc_msb = prev_poc_msb_;
+  }
+  const int poc = poc_msb + poc_lsb;
+
+  // Update the prevTid0 anchor from a TemporalId-0 picture that is not a RASL
+  // or RADL picture (clause 8.3.1).
+  const int temporal_id = nal.nuh_temporal_id_plus1 - 1;
+  const bool rasl_or_radl = nal.type == h265::NalUnitType::kRadlN ||
+                            nal.type == h265::NalUnitType::kRadlR ||
+                            nal.type == h265::NalUnitType::kRaslN ||
+                            nal.type == h265::NalUnitType::kRaslR;
+  if (temporal_id == 0 && !rasl_or_radl) {
+    prev_poc_lsb_ = poc_lsb;
+    prev_poc_msb_ = poc_msb;
+  }
+  seen_first_picture_ = true;
+  return poc;
 }
 
 bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
@@ -172,23 +210,28 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
     return false;
   }
 
-  // This stage decodes intra pictures only. A P / B slice needs the
-  // reference-picture-set to DPB mapping and the reference lists, which come
-  // next; drop it rather than decode against an empty DPB.
-  if (sh.slice_type != h265::SliceType::kI) {
-    V4L2WC_LOG(V4L2WC_WARNING)
-        << "vaapi-h265: inter slice before reference support; dropping";
-    return false;
-  }
+  // Unsupported tools are dropped rather than mis-decoded. A non-flat scaling
+  // list needs scaling_list_data (the parser skips it) and an IQ-matrix buffer;
+  // reference-list modification needs the list_entry values (not parsed);
+  // long-term references need their POC bookkeeping. Common HLS HEVC uses none
+  // of these.
   if (sps_.scaling_list_enabled_flag) {
-    // A non-flat scaling list needs the scaling_list_data the parser skips and
-    // an IQ-matrix buffer; not built yet. Common HLS HEVC keeps this off.
     V4L2WC_LOG(V4L2WC_WARNING)
         << "vaapi-h265: scaling lists unsupported; dropping";
     return false;
   }
   if (pps_.tiles_enabled_flag) {
     V4L2WC_LOG(V4L2WC_WARNING) << "vaapi-h265: tiles unsupported; dropping";
+    return false;
+  }
+  if (pps_.lists_modification_present_flag) {
+    V4L2WC_LOG(V4L2WC_WARNING)
+        << "vaapi-h265: reference-list modification unsupported; dropping";
+    return false;
+  }
+  if (sps_.long_term_ref_pics_present_flag) {
+    V4L2WC_LOG(V4L2WC_WARNING)
+        << "vaapi-h265: long-term references unsupported; dropping";
     return false;
   }
 
@@ -209,8 +252,60 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
   const std::uint32_t num_emu_bytes =
       raw_bit_offset / 8 - slice_data_byte_offset;
 
-  const int poc =
-      h265::IsIdr(nal.type) ? 0 : static_cast<int>(sh.slice_pic_order_cnt_lsb);
+  const int poc = ComputePoc(sh, nal);
+
+  // An IDR clears the DPB before its own reference-picture set is applied.
+  if (h265::IsIdr(nal.type)) {
+    for (auto& r : dpb_) slots_[r.slot].is_reference = false;
+    dpb_.clear();
+  }
+
+  // Reference-picture-set derivation (clause 8.3.2). Each used short-term entry
+  // resolves to a DPB picture by POC; the not-used ("follow") entries are kept
+  // in the DPB so a later picture can reference them. A reference the DPB no
+  // longer holds (e.g. a dropped frame) resolves to an invalid surface.
+  struct RpsEntry {
+    int poc;
+    std::uint32_t slot;
+    bool found;
+  };
+  std::vector<RpsEntry> st_curr_before, st_curr_after;
+  std::vector<int> kept_pocs;
+  auto find_ref = [&](int target) -> RpsEntry {
+    for (const auto& r : dpb_)
+      if (r.poc == target) return {target, r.slot, true};
+    return {target, 0, false};
+  };
+  for (std::uint32_t i = 0; i < sh.current_rps.num_negative_pics; ++i) {
+    const int tpoc = poc + sh.current_rps.delta_poc_s0[i];
+    kept_pocs.push_back(tpoc);
+    if (sh.current_rps.used_s0[i]) st_curr_before.push_back(find_ref(tpoc));
+  }
+  for (std::uint32_t i = 0; i < sh.current_rps.num_positive_pics; ++i) {
+    const int tpoc = poc + sh.current_rps.delta_poc_s1[i];
+    kept_pocs.push_back(tpoc);
+    if (sh.current_rps.used_s1[i]) st_curr_after.push_back(find_ref(tpoc));
+  }
+
+  // Evict every DPB picture the current set does not keep (marks it unused for
+  // reference; its surface frees for reuse).
+  {
+    std::vector<RefPic> kept;
+    for (const auto& r : dpb_) {
+      bool keep = false;
+      for (int p : kept_pocs)
+        if (p == r.poc) {
+          keep = true;
+          break;
+        }
+      if (keep) {
+        kept.push_back(r);
+      } else {
+        slots_[r.slot].is_reference = false;
+      }
+    }
+    dpb_.swap(kept);
+  }
 
   int slot = PickFreeSlot();
   if (slot < 0) {
@@ -227,6 +322,28 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
     ref.picture_id = VA_INVALID_SURFACE;
     ref.flags = VA_PICTURE_HEVC_INVALID;
   }
+  // ReferenceFrames[] holds the DPB pictures; a slot -> ReferenceFrames index
+  // map lets the slice reference lists point into it. Pictures used by the
+  // current picture carry the ST_CURR_BEFORE / ST_CURR_AFTER flags.
+  int ref_index_by_slot[64];
+  for (int& e : ref_index_by_slot) e = -1;
+  int num_ref = 0;
+  for (const auto& r : dpb_) {
+    if (num_ref >= 15) break;
+    VAPictureHEVC& p = pp.ReferenceFrames[num_ref];
+    p.picture_id = slots_[r.slot].surface;
+    p.pic_order_cnt = r.poc;
+    p.flags = 0;
+    for (const auto& e : st_curr_before)
+      if (e.found && e.slot == r.slot)
+        p.flags |= VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE;
+    for (const auto& e : st_curr_after)
+      if (e.found && e.slot == r.slot)
+        p.flags |= VA_PICTURE_HEVC_RPS_ST_CURR_AFTER;
+    if (r.slot < 64) ref_index_by_slot[r.slot] = num_ref;
+    ++num_ref;
+  }
+
   pp.pic_width_in_luma_samples =
       static_cast<std::uint16_t>(sps_.pic_width_in_luma_samples);
   pp.pic_height_in_luma_samples =
@@ -312,7 +429,10 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
       pps_.slice_segment_header_extension_present_flag;
   pp.slice_parsing_fields.bits.RapPicFlag = h265::IsIrap(nal.type) ? 1 : 0;
   pp.slice_parsing_fields.bits.IdrPicFlag = h265::IsIdr(nal.type) ? 1 : 0;
-  pp.slice_parsing_fields.bits.IntraPicFlag = 1;  // intra-only stage
+  // Single-slice pictures (WPP, the packager default): the picture is intra iff
+  // this slice is.
+  pp.slice_parsing_fields.bits.IntraPicFlag =
+      sh.slice_type == h265::SliceType::kI ? 1 : 0;
 
   pp.log2_max_pic_order_cnt_lsb_minus4 =
       static_cast<std::uint8_t>(sps_.log2_max_pic_order_cnt_lsb - 4);
@@ -337,7 +457,44 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
   sp.slice_data_byte_offset = slice_data_byte_offset;
   sp.slice_segment_address = sh.slice_segment_address;
   for (auto& list : sp.RefPicList)
-    for (auto& e : list) e = 0xFF;  // no references for an intra slice
+    for (auto& e : list) e = 0xFF;
+
+  // Reference lists (clause 8.3.4). The temporary list cycles through the
+  // current picture's short-term sets until it is at least as long as the
+  // active count, then the first entries are taken. Reference-list modification
+  // is not signalled (dropped above), so RefPicListX = RefPicListTempX. Each
+  // entry is stored as its index into ReferenceFrames[].
+  const bool is_p = sh.slice_type == h265::SliceType::kP;
+  const bool is_b = sh.slice_type == h265::SliceType::kB;
+  // A reference the DPB no longer holds maps to 0xFF (invalid); it never
+  // aliases the picture that happens to occupy slot 0.
+  auto ref_of = [&](const RpsEntry& e) -> std::uint8_t {
+    return (e.found && e.slot < 64 && ref_index_by_slot[e.slot] >= 0)
+               ? static_cast<std::uint8_t>(ref_index_by_slot[e.slot])
+               : 0xFF;
+  };
+  if (is_p || is_b) {
+    // L0: StCurrBefore, then StCurrAfter.
+    std::vector<std::uint8_t> temp0;
+    for (const auto& e : st_curr_before) temp0.push_back(ref_of(e));
+    for (const auto& e : st_curr_after) temp0.push_back(ref_of(e));
+    if (!temp0.empty()) {
+      for (std::uint32_t i = 0; i <= sh.num_ref_idx_l0_active_minus1 && i < 15;
+           ++i)
+        sp.RefPicList[0][i] = temp0[i % temp0.size()];
+    }
+    if (is_b) {
+      // L1: StCurrAfter, then StCurrBefore.
+      std::vector<std::uint8_t> temp1;
+      for (const auto& e : st_curr_after) temp1.push_back(ref_of(e));
+      for (const auto& e : st_curr_before) temp1.push_back(ref_of(e));
+      if (!temp1.empty()) {
+        for (std::uint32_t i = 0;
+             i <= sh.num_ref_idx_l1_active_minus1 && i < 15; ++i)
+          sp.RefPicList[1][i] = temp1[i % temp1.size()];
+      }
+    }
+  }
   sp.LongSliceFlags.fields.LastSliceOfPic = 1;
   sp.LongSliceFlags.fields.dependent_slice_segment_flag =
       sh.dependent_slice_segment_flag;
@@ -353,7 +510,11 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
   sp.LongSliceFlags.fields.collocated_from_l0_flag = sh.collocated_from_l0_flag;
   sp.LongSliceFlags.fields.slice_loop_filter_across_slices_enabled_flag =
       sh.slice_loop_filter_across_slices_enabled_flag;
-  sp.collocated_ref_idx = 0xFF;  // no temporal MVP source in an intra slice
+  // collocated_ref_idx indexes the collocated reference list; only meaningful
+  // when temporal MVP is on (0xFF otherwise, e.g. an intra slice).
+  sp.collocated_ref_idx = sh.slice_temporal_mvp_enabled_flag
+                              ? static_cast<std::uint8_t>(sh.collocated_ref_idx)
+                              : 0xFF;
   sp.num_ref_idx_l0_active_minus1 =
       static_cast<std::uint8_t>(sh.num_ref_idx_l0_active_minus1);
   sp.num_ref_idx_l1_active_minus1 =
@@ -369,6 +530,50 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
   sp.num_entry_point_offsets =
       static_cast<std::uint16_t>(sh.num_entry_point_offsets);
   sp.slice_data_num_emu_prevn_bytes = static_cast<std::uint16_t>(num_emu_bytes);
+
+  // Weighted prediction (clause 7.4.7.3). VA takes the luma weight/offset
+  // deltas as-is and the derived chroma offsets. An unflagged reference keeps
+  // the default weight (delta 0) and zero offset. The common HLS stream signals
+  // the table with default weights, so this is usually all zeros.
+  if (is_p || is_b) {
+    const auto& w = sh.pred_weight;
+    sp.luma_log2_weight_denom =
+        static_cast<std::uint8_t>(w.luma_log2_weight_denom);
+    sp.delta_chroma_log2_weight_denom =
+        static_cast<std::int8_t>(w.delta_chroma_log2_weight_denom);
+    const int chroma_denom = static_cast<int>(w.luma_log2_weight_denom) +
+                             w.delta_chroma_log2_weight_denom;
+    constexpr int kWpOffsetHalfRangeC =
+        128;  // 8-bit, no high-precision offsets
+    auto fill = [&](int list, std::uint32_t active_minus1,
+                    std::int8_t (&dlw)[15], std::int8_t (&lo)[15],
+                    std::int8_t (&dcw)[15][2], std::int8_t (&co)[15][2]) {
+      for (std::uint32_t i = 0; i <= active_minus1 && i < 15; ++i) {
+        if (w.luma_weight_flag[list][i]) {
+          dlw[i] = static_cast<std::int8_t>(w.delta_luma_weight[list][i]);
+          lo[i] = static_cast<std::int8_t>(w.luma_offset[list][i]);
+        }
+        if (w.chroma_weight_flag[list][i]) {
+          for (int j = 0; j < 2; ++j) {
+            const int cweight =
+                (1 << chroma_denom) + w.delta_chroma_weight[list][i][j];
+            dcw[i][j] =
+                static_cast<std::int8_t>(w.delta_chroma_weight[list][i][j]);
+            int off = kWpOffsetHalfRangeC + w.delta_chroma_offset[list][i][j] -
+                      ((kWpOffsetHalfRangeC * cweight) >> chroma_denom);
+            if (off < -kWpOffsetHalfRangeC) off = -kWpOffsetHalfRangeC;
+            if (off > kWpOffsetHalfRangeC - 1) off = kWpOffsetHalfRangeC - 1;
+            co[i][j] = static_cast<std::int8_t>(off);
+          }
+        }
+      }
+    };
+    fill(0, sh.num_ref_idx_l0_active_minus1, sp.delta_luma_weight_l0,
+         sp.luma_offset_l0, sp.delta_chroma_weight_l0, sp.ChromaOffsetL0);
+    if (is_b)
+      fill(1, sh.num_ref_idx_l1_active_minus1, sp.delta_luma_weight_l1,
+           sp.luma_offset_l1, sp.delta_chroma_weight_l1, sp.ChromaOffsetL1);
+  }
 
   VABufferID b_pp = 0, b_sp = 0, b_sd = 0;
   auto ck = [&](VAStatus s, const char* what) {
@@ -401,14 +606,30 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
   va_.DestroyBuffer(dpy_, b_sd);
   if (!ok) return false;
 
-  // Park as ready (latest-wins). A previously parked but un-acquired frame is
-  // simply dropped: with no references held, its surface is free again as soon
-  // as ready_slot_ moves off it (PickFreeSlot skips only the current ready and
-  // checked-out slots).
+  // Park as ready (latest-wins). A previously parked frame that is not a
+  // reference and not checked out frees for reuse once ready_slot_ moves off
+  // it.
   ready_slot_ = static_cast<std::uint32_t>(slot);
   have_ready_ = true;
   slots_[slot].width = coded_w_;
   slots_[slot].height = coded_h_;
+
+  // Add the decoded picture to the DPB as a short-term reference; a later
+  // picture's RPS evicts it when it is no longer needed. Guard against
+  // unbounded growth if a reference goes missing by dropping the lowest-POC
+  // entry beyond the DPB size.
+  slots_[slot].is_reference = true;
+  dpb_.push_back(RefPic{static_cast<std::uint32_t>(slot), poc});
+  const std::size_t max_dpb =
+      static_cast<std::size_t>(sps_.sps_max_dec_pic_buffering_minus1) + 1;
+  while (dpb_.size() > max_dpb) {
+    std::size_t oldest = 0;
+    for (std::size_t i = 1; i < dpb_.size(); ++i)
+      if (dpb_[i].poc < dpb_[oldest].poc) oldest = i;
+    if (dpb_[oldest].slot != static_cast<std::uint32_t>(slot))
+      slots_[dpb_[oldest].slot].is_reference = false;
+    dpb_.erase(dpb_.begin() + oldest);
+  }
   return true;
 }
 
@@ -509,9 +730,16 @@ void VaapiH265Decoder::Release(std::uint32_t slot) {
 }
 
 void VaapiH265Decoder::Flush() {
-  // Forget the pending frame, as an IDR does mid-stream. Surfaces a consumer
-  // still holds stay checked out until it releases them. The decoder stays
-  // configured, so no VAAPI resources are torn down.
+  // Drop every reference and the pending frame, as a seek does: the next
+  // keyframe rebuilds the DPB. Surfaces a consumer still holds stay checked out
+  // until it releases them; everything else frees. The decoder stays
+  // configured, so no VAAPI resources are torn down. POC restarts from the
+  // post-seek keyframe.
+  for (auto& r : dpb_) slots_[r.slot].is_reference = false;
+  dpb_.clear();
+  prev_poc_lsb_ = 0;
+  prev_poc_msb_ = 0;
+  seen_first_picture_ = false;
   have_ready_ = false;
 }
 
