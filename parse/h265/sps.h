@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "parse/bit_reader.h"
+#include "parse/h265/scaling_list.h"
 
 namespace v4l2wc::h265 {
 
@@ -88,6 +89,10 @@ struct Sps {
   uint32_t pic_size_in_ctbs = 0;
 
   bool scaling_list_enabled_flag = false;
+  bool sps_scaling_list_data_present_flag = false;
+  // The scaling lists in effect from the SPS: parsed when signalled, otherwise
+  // the HEVC defaults. Meaningful only when scaling_list_enabled_flag is set.
+  ScalingListData scaling_list;
   bool amp_enabled_flag = false;
   bool sample_adaptive_offset_enabled_flag = false;
   bool pcm_enabled_flag = false;

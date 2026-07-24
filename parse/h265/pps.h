@@ -17,6 +17,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "parse/h265/scaling_list.h"
+
 namespace v4l2wc::h265 {
 
 // Bound on num_tile_columns_minus1 / num_tile_rows_minus1. The spec ties these
@@ -75,6 +77,9 @@ struct Pps {
   int32_t pps_tc_offset_div2 = 0;
 
   bool pps_scaling_list_data_present_flag = false;
+  // Scaling lists signalled by the PPS (present only when the flag above is
+  // set); these override the SPS lists for the picture.
+  ScalingListData scaling_list;
   bool lists_modification_present_flag = false;
   uint32_t log2_parallel_merge_level_minus2 = 0;
   bool slice_segment_header_extension_present_flag = false;

@@ -4,6 +4,7 @@
 #include "parse/h265/sps.h"
 
 #include "parse/bit_reader.h"
+#include "parse/h265/scaling_list.h"
 
 namespace v4l2wc::h265 {
 
@@ -62,42 +63,6 @@ bool ParseProfileTierLevel(BitReader* br, uint32_t max_sub_layers_minus1,
     }
     if (sub_layer_level_present[i] && !br->SkipBits(8)) {
       return false;  // sub_layer_level_idc
-    }
-  }
-  return true;
-}
-
-// scaling_list_data (clause 7.3.4). Consumed and discarded; the running
-// arithmetic is not needed, only correct advancement past the syntax.
-bool SkipScalingListData(BitReader* br) {
-  for (uint32_t size_id = 0; size_id < 4; ++size_id) {
-    for (uint32_t matrix_id = 0; matrix_id < 6;
-         matrix_id += (size_id == 3) ? 3 : 1) {
-      bool pred_mode = false;
-      if (!br->ReadFlag(&pred_mode)) {
-        return false;
-      }
-      if (!pred_mode) {
-        uint32_t pred_matrix_id_delta = 0;
-        if (!br->ReadUe(&pred_matrix_id_delta)) {  // reference an earlier list
-          return false;
-        }
-        continue;
-      }
-      // coefNum = Min(64, 1 << (4 + (sizeId << 1))).
-      uint32_t coef_num = 1u << (4 + (size_id << 1));
-      if (coef_num > 64) {
-        coef_num = 64;
-      }
-      int32_t ignore = 0;
-      if (size_id > 1 && !br->ReadSe(&ignore)) {  // scaling_list_dc_coef_minus8
-        return false;
-      }
-      for (uint32_t i = 0; i < coef_num; ++i) {
-        if (!br->ReadSe(&ignore)) {  // scaling_list_delta_coef
-          return false;
-        }
-      }
     }
   }
   return true;
@@ -417,12 +382,16 @@ bool ParseSps(const uint8_t* rbsp, size_t size, Sps* out) {
     return false;
   }
   if (sps.scaling_list_enabled_flag) {
-    bool scaling_list_data_present = false;
-    if (!br.ReadFlag(&scaling_list_data_present)) {
+    if (!br.ReadFlag(&sps.sps_scaling_list_data_present_flag)) {
       return false;
     }
-    if (scaling_list_data_present && !SkipScalingListData(&br)) {
-      return false;
+    if (sps.sps_scaling_list_data_present_flag) {
+      if (!ParseScalingListData(&br, &sps.scaling_list)) {
+        return false;
+      }
+    } else {
+      // Enabled but not signalled: the default scaling lists apply.
+      SetDefaultScalingList(&sps.scaling_list);
     }
   }
 

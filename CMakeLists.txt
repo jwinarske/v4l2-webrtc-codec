@@ -21,6 +21,7 @@ add_library(v4l2wc_parse STATIC
   parse/h265/nal.cc
   parse/h265/sps.cc
   parse/h265/pps.cc
+  parse/h265/scaling_list.cc
   parse/h265/slice_header.cc
 )
 target_include_directories(v4l2wc_parse PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -53,6 +54,10 @@ add_test(NAME h265_sps_test COMMAND h265_sps_test)
 add_executable(h265_pps_test test/parse/h265_pps_test.cc)
 target_link_libraries(h265_pps_test PRIVATE v4l2wc_parse)
 add_test(NAME h265_pps_test COMMAND h265_pps_test)
+
+add_executable(h265_scaling_list_test test/parse/h265_scaling_list_test.cc)
+target_link_libraries(h265_scaling_list_test PRIVATE v4l2wc_parse)
+add_test(NAME h265_scaling_list_test COMMAND h265_scaling_list_test)
 
 add_executable(h265_slice_header_test test/parse/h265_slice_header_test.cc)
 target_link_libraries(h265_slice_header_test PRIVATE v4l2wc_parse)
@@ -129,12 +134,14 @@ if(V4L2WC_HAVE_LIBFUZZER)
   set(_fuzz_pps_sources ${_fuzz_nal_sources})
   set(_fuzz_slice_header_sources ${_fuzz_nal_sources})
   set(_fuzz_h265_nal_sources parse/h265/nal.cc)
-  set(_fuzz_h265_sps_sources parse/h265/sps.cc)
-  set(_fuzz_h265_pps_sources parse/h265/pps.cc)
+  set(_fuzz_h265_sps_sources parse/h265/sps.cc parse/h265/scaling_list.cc)
+  set(_fuzz_h265_pps_sources parse/h265/pps.cc parse/h265/scaling_list.cc)
   set(_fuzz_h265_slice_header_sources
-    parse/h265/nal.cc parse/h265/sps.cc parse/h265/slice_header.cc)
+    parse/h265/nal.cc parse/h265/sps.cc parse/h265/scaling_list.cc
+    parse/h265/slice_header.cc)
+  set(_fuzz_h265_scaling_list_sources parse/h265/scaling_list.cc)
   foreach(target nal sps pps slice_header h265_nal h265_sps h265_pps
-                 h265_slice_header)
+                 h265_slice_header h265_scaling_list)
     add_executable(${target}_fuzzer test/fuzz/${target}_fuzzer.cc
       ${_fuzz_${target}_sources})
     target_include_directories(${target}_fuzzer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

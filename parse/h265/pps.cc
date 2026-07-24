@@ -4,50 +4,11 @@
 #include "parse/h265/pps.h"
 
 #include "parse/bit_reader.h"
+#include "parse/h265/scaling_list.h"
 
 namespace v4l2wc::h265 {
 
 Pps::Pps() = default;
-
-namespace {
-
-// scaling_list_data (clause 7.3.4). Consumed and discarded; only correct
-// advancement past the syntax matters here. Kept local to the translation unit,
-// matching the H.264 parsers.
-bool SkipScalingListData(BitReader* br) {
-  for (uint32_t size_id = 0; size_id < 4; ++size_id) {
-    for (uint32_t matrix_id = 0; matrix_id < 6;
-         matrix_id += (size_id == 3) ? 3 : 1) {
-      bool pred_mode = false;
-      if (!br->ReadFlag(&pred_mode)) {
-        return false;
-      }
-      if (!pred_mode) {
-        uint32_t pred_matrix_id_delta = 0;
-        if (!br->ReadUe(&pred_matrix_id_delta)) {
-          return false;
-        }
-        continue;
-      }
-      uint32_t coef_num = 1u << (4 + (size_id << 1));
-      if (coef_num > 64) {
-        coef_num = 64;
-      }
-      int32_t ignore = 0;
-      if (size_id > 1 && !br->ReadSe(&ignore)) {  // scaling_list_dc_coef_minus8
-        return false;
-      }
-      for (uint32_t i = 0; i < coef_num; ++i) {
-        if (!br->ReadSe(&ignore)) {  // scaling_list_delta_coef
-          return false;
-        }
-      }
-    }
-  }
-  return true;
-}
-
-}  // namespace
 
 bool ParsePps(const uint8_t* rbsp, size_t size, Pps* out) {
   if (rbsp == nullptr || out == nullptr) {
@@ -142,7 +103,8 @@ bool ParsePps(const uint8_t* rbsp, size_t size, Pps* out) {
   if (!br.ReadFlag(&pps.pps_scaling_list_data_present_flag)) {
     return false;
   }
-  if (pps.pps_scaling_list_data_present_flag && !SkipScalingListData(&br)) {
+  if (pps.pps_scaling_list_data_present_flag &&
+      !ParseScalingListData(&br, &pps.scaling_list)) {
     return false;
   }
 
