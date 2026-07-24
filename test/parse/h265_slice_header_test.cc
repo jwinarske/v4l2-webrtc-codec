@@ -170,6 +170,7 @@ int main() {
     CHECK(sh.slice_type == SliceType::kP);
     CHECK(sh.slice_pic_order_cnt_lsb == 2);
     CHECK(sh.short_term_ref_pic_set_sps_flag == false);  // inline
+    CHECK(sh.short_term_ref_pic_set_bits == 8);
     CHECK(sh.current_rps.num_negative_pics == 1);
     CHECK(sh.current_rps.num_positive_pics == 0);
     CHECK(sh.num_pic_total_curr == 1);

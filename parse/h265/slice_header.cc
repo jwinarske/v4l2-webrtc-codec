@@ -204,11 +204,14 @@ bool ParseSliceHeader(const uint8_t* rbsp, size_t size, NalUnitType nal_type,
         static_cast<uint32_t>(ctx.short_term_rps.size());
     if (!sh.short_term_ref_pic_set_sps_flag) {
       // Inline set, index == num_short_term_ref_pic_sets; may inter-predict
-      // from an SPS-defined set.
+      // from an SPS-defined set. Record its bit size for the hardware decoder.
+      const size_t rps_start = br.bit_pos();
       if (!ParseShortTermRps(&br, num_st_rps, num_st_rps, ctx.short_term_rps,
                              &sh.current_rps)) {
         return false;
       }
+      sh.short_term_ref_pic_set_bits =
+          static_cast<uint32_t>(br.bit_pos() - rps_start);
     } else if (num_st_rps > 1) {
       if (!br.ReadBits(CeilLog2(num_st_rps), &sh.short_term_ref_pic_set_idx)) {
         return false;

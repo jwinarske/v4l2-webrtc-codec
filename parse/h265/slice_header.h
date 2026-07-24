@@ -93,6 +93,10 @@ struct SliceHeader {
   uint32_t slice_pic_order_cnt_lsb = 0;
   bool short_term_ref_pic_set_sps_flag = false;
   uint32_t short_term_ref_pic_set_idx = 0;
+  // Bit size of the inline st_ref_pic_set(num_short_term_ref_pic_sets) when
+  // short_term_ref_pic_set_sps_flag is 0; 0 otherwise. A hardware decoder is
+  // told this so it can skip re-parsing that structure (VAAPI st_rps_bits).
+  uint32_t short_term_ref_pic_set_bits = 0;
   // The short-term RPS in effect for this slice: selected from the SPS by
   // index, or derived inline. Empty for IDR slices.
   ShortTermRps current_rps;
