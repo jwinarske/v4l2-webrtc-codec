@@ -20,6 +20,7 @@ add_library(v4l2wc_parse STATIC
   parse/h264/slice_header.cc
   parse/h265/nal.cc
   parse/h265/sps.cc
+  parse/h265/pps.cc
 )
 target_include_directories(v4l2wc_parse PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(v4l2wc_parse PRIVATE -Wall -Wextra)
@@ -47,6 +48,10 @@ add_test(NAME h265_nal_test COMMAND h265_nal_test)
 add_executable(h265_sps_test test/parse/h265_sps_test.cc)
 target_link_libraries(h265_sps_test PRIVATE v4l2wc_parse)
 add_test(NAME h265_sps_test COMMAND h265_sps_test)
+
+add_executable(h265_pps_test test/parse/h265_pps_test.cc)
+target_link_libraries(h265_pps_test PRIVATE v4l2wc_parse)
+add_test(NAME h265_pps_test COMMAND h265_pps_test)
 
 # ---- webrtc-free decode core -----------------------------------------------
 # The decode engines, hoisted out of the libwebrtc build so a consumer that is
@@ -119,7 +124,8 @@ if(V4L2WC_HAVE_LIBFUZZER)
   set(_fuzz_slice_header_sources ${_fuzz_nal_sources})
   set(_fuzz_h265_nal_sources parse/h265/nal.cc)
   set(_fuzz_h265_sps_sources parse/h265/sps.cc)
-  foreach(target nal sps pps slice_header h265_nal h265_sps)
+  set(_fuzz_h265_pps_sources parse/h265/pps.cc)
+  foreach(target nal sps pps slice_header h265_nal h265_sps h265_pps)
     add_executable(${target}_fuzzer test/fuzz/${target}_fuzzer.cc
       ${_fuzz_${target}_sources})
     target_include_directories(${target}_fuzzer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
