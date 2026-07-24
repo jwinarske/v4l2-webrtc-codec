@@ -60,6 +60,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   ctx.entropy_coding_sync_enabled_flag = (cfg3 >> 7) & 1;
   ctx.lists_modification_present_flag = cfg0 & 1;
   ctx.slice_segment_header_extension_present_flag = (cfg0 >> 1) & 1;
+  ctx.chroma_qp_offset_list_enabled_flag = (cfg1 >> 3) & 1;
   // A couple of SPS-defined short-term RPSs, so the SPS-index and single-set
   // branches are reachable.
   v4l2wc::h265::ShortTermRps rps;

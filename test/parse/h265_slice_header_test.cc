@@ -356,6 +356,36 @@ int main() {
     CHECK(sh.num_pic_total_curr == 1);
   }
 
+  // Synthetic IDR I slice with the PPS chroma-QP-offset list enabled: the slice
+  // signals cu_chroma_qp_offset_enabled_flag (range extension).
+  {
+    SliceContext cctx;
+    cctx.pic_size_in_ctbs = 1;
+    cctx.chroma_array_type = 1;
+    cctx.pps_slice_chroma_qp_offsets_present_flag = true;
+    cctx.chroma_qp_offset_list_enabled_flag = true;
+
+    BitWriter w;
+    w.WriteFlag(true);   // first_slice_segment_in_pic_flag
+    w.WriteFlag(false);  // no_output_of_prior_pics_flag (IDR is an IRAP)
+    w.WriteUe(0);        // slice_pic_parameter_set_id
+    w.WriteUe(2);        // slice_type = I
+    // (IDR: no POC / RPS; SAO off; no P/B block.)
+    w.WriteUe(0);       // slice_qp_delta se(0)
+    w.WriteUe(0);       // slice_cb_qp_offset se(0)
+    w.WriteUe(0);       // slice_cr_qp_offset se(0)
+    w.WriteFlag(true);  // cu_chroma_qp_offset_enabled_flag
+    w.WriteFlag(true);  // byte_alignment
+    const std::vector<uint8_t> rbsp = w.bytes();
+
+    SliceHeader sh;
+    const bool ok = ParseSliceHeader(rbsp.data(), rbsp.size(),
+                                     NalUnitType::kIdrWRadl, cctx, &sh);
+    CHECK(ok);
+    CHECK(sh.slice_type == SliceType::kI);
+    CHECK(sh.cu_chroma_qp_offset_enabled_flag == true);
+  }
+
   // Synthetic dependent slice segment: parsing ends after the segment address.
   {
     SliceContext dctx;

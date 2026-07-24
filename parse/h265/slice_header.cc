@@ -380,9 +380,13 @@ bool ParseSliceHeader(const uint8_t* rbsp, size_t size, NalUnitType nal_type,
        !br.ReadSe(&sh.slice_cr_qp_offset))) {
     return false;
   }
-  // The PPS range extension (cu_chroma_qp_offset_enabled_flag and
-  // deblocking_filter_override at the range-extension level) is out of scope,
-  // in line with the Main / Main-10 profiles this targets.
+  // Range extension: pps_slice_act_qp_offsets (SCC) is out of scope, but when
+  // the PPS enables the chroma-QP-offset list, the slice signals whether the
+  // per-CU chroma QP offset is used.
+  if (ctx.chroma_qp_offset_list_enabled_flag &&
+      !br.ReadFlag(&sh.cu_chroma_qp_offset_enabled_flag)) {
+    return false;
+  }
   bool deblocking_filter_override = false;
   if (ctx.deblocking_filter_override_enabled_flag &&
       !br.ReadFlag(&deblocking_filter_override)) {

@@ -103,6 +103,8 @@ struct SliceContext {
   bool entropy_coding_sync_enabled_flag = false;
   bool lists_modification_present_flag = false;
   bool slice_segment_header_extension_present_flag = false;
+  // From the PPS range extension; gates cu_chroma_qp_offset_enabled_flag.
+  bool chroma_qp_offset_list_enabled_flag = false;
 };
 
 struct SliceHeader {
@@ -175,6 +177,7 @@ struct SliceHeader {
   int32_t slice_qp_delta = 0;
   int32_t slice_cb_qp_offset = 0;
   int32_t slice_cr_qp_offset = 0;
+  bool cu_chroma_qp_offset_enabled_flag = false;  // range extension
   bool slice_deblocking_filter_disabled_flag = false;
   int32_t slice_beta_offset_div2 = 0;
   int32_t slice_tc_offset_div2 = 0;
