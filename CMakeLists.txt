@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Joel Winarske
 # SPDX-License-Identifier: MIT
 
-# Standalone dev/CI build of the pure-logic layers (bitstream parse/) and their
-# unit tests. No webrtc, no V4L2 — this builds and runs on the host so the
-# memory-safety-critical parsers are unit-tested and fuzzed off-target. The
-# decoder itself is absorbed into libwebrtc.so via BUILD.gn (lw_enable_v4l2_codec).
+# Standalone dev/CI build of the host-buildable layers: the bitstream parse/
+# parsers and the webrtc-free decode core (v4l2wc_core). Builds on the host so
+# the memory-safety-critical parsers are unit-tested and fuzzed off-target and
+# the engines are proven to link without webrtc. The full decoder is still
+# absorbed into libwebrtc.so via BUILD.gn (lw_enable_v4l2_codec).
 cmake_minimum_required(VERSION 3.16)
 project(v4l2_webrtc_codec_parse LANGUAGES CXX)
 
@@ -36,6 +37,43 @@ add_test(NAME h264_pps_test COMMAND h264_pps_test)
 add_executable(h264_slice_header_test test/parse/h264_slice_header_test.cc)
 target_link_libraries(h264_slice_header_test PRIVATE v4l2wc_parse)
 add_test(NAME h264_slice_header_test COMMAND h264_slice_header_test)
+
+# ---- webrtc-free decode core -----------------------------------------------
+# The decode engines, hoisted out of the libwebrtc build so a consumer that is
+# not webrtc (the ivi-homescreen HLS player plugin) can link them. The engines
+# log through the seam in src/log.h instead of RTC_LOG, so nothing here pulls
+# in webrtc.
+#
+# VAAPI needs the libva headers at build time; it dlopens the library itself at
+# runtime. Without the headers only the V4L2 M2M engine is built, which is the
+# right shape for a device (e.g. a Pi) that has no VAAPI anyway.
+find_path(V4L2WC_VA_INCLUDE va/va.h)
+
+add_library(v4l2wc_core STATIC
+  src/log.cc
+  src/dma_decoder.cc
+  src/v4l2_m2m_decoder.cc
+)
+target_link_libraries(v4l2wc_core PUBLIC v4l2wc_parse)
+target_include_directories(v4l2wc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(v4l2wc_core PRIVATE -Wall -Wextra)
+
+if(V4L2WC_VA_INCLUDE)
+  target_sources(v4l2wc_core PRIVATE
+    src/va_loader.cc
+    src/vaapi_h264_decoder.cc)
+  target_include_directories(v4l2wc_core PRIVATE ${V4L2WC_VA_INCLUDE})
+  target_link_libraries(v4l2wc_core PUBLIC ${CMAKE_DL_LIBS})
+  target_compile_definitions(v4l2wc_core PUBLIC V4L2WC_HAVE_VAAPI=1)
+  message(STATUS "v4l2wc_core: VAAPI engine enabled (${V4L2WC_VA_INCLUDE})")
+else()
+  target_compile_definitions(v4l2wc_core PUBLIC V4L2WC_HAVE_VAAPI=0)
+  message(STATUS "v4l2wc_core: libva headers not found, VAAPI engine disabled")
+endif()
+
+add_executable(v4l2wc_core_test test/core/core_smoke_test.cc)
+target_link_libraries(v4l2wc_core_test PRIVATE v4l2wc_core)
+add_test(NAME v4l2wc_core_test COMMAND v4l2wc_core_test)
 
 # ---- fuzz gate -------------------------------------------------------------
 # The bitstream is attacker-controlled and reachable once DTLS is up, so the

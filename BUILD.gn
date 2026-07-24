@@ -50,6 +50,8 @@ source_set("v4l2wc") {
     "parse/h264/sps.h",
     "src/dma_decoder.cc",
     "src/dma_decoder.h",
+    "src/log.cc",
+    "src/log.h",
     "src/v4l2_decoder.cc",
     "src/v4l2_decoder.h",
     "src/v4l2_m2m_decoder.cc",
