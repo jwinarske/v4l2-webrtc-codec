@@ -101,14 +101,18 @@ bool ParsePps(const uint8_t* rbsp, size_t size, Pps* out) {
       return false;
     }
     if (!pps.uniform_spacing_flag) {
-      uint32_t ignore = 0;
+      // The last column / row width is not coded (it is derived from the
+      // picture size), so only num_tile_columns_minus1 / num_tile_rows_minus1
+      // explicit values are present.
+      pps.column_width_minus1.resize(pps.num_tile_columns_minus1);
+      pps.row_height_minus1.resize(pps.num_tile_rows_minus1);
       for (uint32_t i = 0; i < pps.num_tile_columns_minus1; ++i) {
-        if (!br.ReadUe(&ignore)) {  // column_width_minus1[i]
+        if (!br.ReadUe(&pps.column_width_minus1[i])) {
           return false;
         }
       }
       for (uint32_t i = 0; i < pps.num_tile_rows_minus1; ++i) {
-        if (!br.ReadUe(&ignore)) {  // row_height_minus1[i]
+        if (!br.ReadUe(&pps.row_height_minus1[i])) {
           return false;
         }
       }

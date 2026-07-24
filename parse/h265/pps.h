@@ -15,6 +15,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace v4l2wc::h265 {
 
@@ -59,6 +60,11 @@ struct Pps {
   uint32_t num_tile_columns_minus1 = 0;
   uint32_t num_tile_rows_minus1 = 0;
   bool uniform_spacing_flag = true;
+  // Explicit per-tile widths/heights in CTBs, present only when
+  // uniform_spacing_flag is false. Each holds num_tile_columns_minus1 /
+  // num_tile_rows_minus1 entries (the last column/row is derived, not coded).
+  std::vector<uint32_t> column_width_minus1;
+  std::vector<uint32_t> row_height_minus1;
   bool loop_filter_across_tiles_enabled_flag = true;
 
   bool pps_loop_filter_across_slices_enabled_flag = false;

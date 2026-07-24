@@ -194,6 +194,12 @@ int main() {
       CHECK(pps.num_tile_columns_minus1 == 2);
       CHECK(pps.num_tile_rows_minus1 == 1);
       CHECK(pps.uniform_spacing_flag == false);
+      // Explicit tile geometry: two coded column widths and one row height.
+      CHECK(pps.column_width_minus1.size() == 2);
+      CHECK(pps.column_width_minus1[0] == 3);
+      CHECK(pps.column_width_minus1[1] == 4);
+      CHECK(pps.row_height_minus1.size() == 1);
+      CHECK(pps.row_height_minus1[0] == 5);
       CHECK(pps.loop_filter_across_tiles_enabled_flag == true);
       CHECK(pps.pps_loop_filter_across_slices_enabled_flag == true);
       CHECK(pps.deblocking_filter_control_present_flag == true);
