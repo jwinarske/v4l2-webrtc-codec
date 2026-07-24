@@ -24,6 +24,20 @@ namespace {
 
 constexpr int kMaxDpb = V4L2_HEVC_DPB_ENTRIES_NUM_MAX;
 
+// DRM fourccs and the Broadcom SAND128 column-tiled modifier (uapi
+// drm_fourcc.h), inlined so the core library needs no libdrm at build time.
+// The V4L2 column-tiled CAPTURE formats map to a standard DRM format plus the
+// SAND128 modifier, whose parameter carries the tile column height a consumer
+// needs to import and detile the dma-buf.
+constexpr std::uint32_t kDrmFormatNV12 = 0x3231564e;  // 'NV12' (8-bit 4:2:0)
+constexpr std::uint32_t kDrmFormatP030 = 0x30333050;  // 'P030' (10-bit packed)
+std::uint64_t Sand128ColHeight(std::uint32_t col_h) {
+  constexpr std::uint64_t kVendorBroadcom = 7;
+  constexpr std::uint64_t kSand128 = 3;
+  return (kVendorBroadcom << 56) |
+         ((static_cast<std::uint64_t>(col_h) << 8) | kSand128);
+}
+
 int Xioctl(int fd, unsigned long req, void* arg) {
   int r;
   do {
@@ -966,8 +980,10 @@ bool V4l2StatelessH265Decoder::Acquire(V4l2DmaFrame* out) {
   out->capture_index = static_cast<std::uint32_t>(cap);
   out->width = coded_w_;
   out->height = coded_h_;
-  out->drm_fourcc = cap_fourcc_;
-  out->modifier = 0;
+  // Present a standard DRM format plus the SAND128 modifier (carrying the tile
+  // column height) so a GL/KMS consumer can import and detile the dma-buf.
+  out->drm_fourcc = coded_bit_depth_ == 10 ? kDrmFormatP030 : kDrmFormatNV12;
+  out->modifier = Sand128ColHeight(luma_col_h_);
   out->num_planes = cap_planes_;
   for (int p = 0; p < V4l2DmaFrame::kMaxPlanes; ++p) {
     out->fds[p] = (p < static_cast<int>(cap_planes_)) ? c.fd[p] : -1;

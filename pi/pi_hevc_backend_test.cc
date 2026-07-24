@@ -3,12 +3,13 @@
 
 // On-device test for V4l2StatelessH265Decoder: drives the real IDmaDecoder
 // surface (SubmitBitstream / Acquire / Release) one access unit at a time,
-// maps each Acquired dma-buf, detiles the Broadcom NV12_COL128 output into
-// planar I420, and writes it out for a byte-exact compare against an ffmpeg
-// software reference. Cross-built for aarch64 with emb; run on the Pi.
+// maps each Acquired dma-buf, and reconstructs planar I420 / I010 for a
+// byte-exact compare against an ffmpeg software reference. It reads the frame's
+// DRM fourcc and SAND128 modifier to detile (and, for P030, unpack the packed
+// 10-bit samples), so no tiling geometry is hard-coded. Cross-built for aarch64
+// with emb; run on the Pi.
 
 #include <fcntl.h>
-#include <linux/videodev2.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -129,18 +130,23 @@ int main(int argc, char** argv) {
     auto* uv = static_cast<std::uint8_t*>(
         mmap(nullptr, st1.st_size, PROT_READ, MAP_SHARED, f.fds[1], 0));
     if (y != MAP_FAILED && uv != MAP_FAILED) {
-      // The tiled column height is the format's plane height (luma) and half
-      // (chroma); production code would read it from the SAND DRM modifier.
+      // Read the tile column height from the SAND128 modifier parameter
+      // (drm_fourcc.h fourcc_mod_broadcom_param); chroma is half for 4:2:0.
+      // Bit depth comes from the DRM fourcc (P030 = 10-bit packed).
       const std::uint32_t stride = f.pitches[0];
-      const bool ten = f.drm_fourcc == v4l2_fourcc('N', 'c', '3', '0');
+      const std::uint32_t luma_col_h =
+          static_cast<std::uint32_t>((f.modifier >> 8) & 0xffffffffffffULL);
+      const std::uint32_t col_h = luma_col_h ? luma_col_h : h;
+      const std::uint32_t ccol_h = col_h / 2;
+      const bool ten = f.drm_fourcc == 0x30333050;  // DRM_FORMAT_P030
       std::vector<std::uint8_t> yout, uout, vout;
       if (ten) {
         // Packed SAND 10-bit: detile the packed bytes, then unpack 3-per-4 into
         // 16-bit samples; chroma unpacks the interleaved UV stream (w samples
         // per row) and de-interleaves it.
         std::vector<std::uint8_t> yb, cb;
-        Detile(y, stride, h, h, &yb);
-        Detile(uv, stride, h / 2, h / 2, &cb);
+        Detile(y, stride, h, col_h, &yb);
+        Detile(uv, stride, h / 2, ccol_h, &cb);
         yout.resize(static_cast<size_t>(w) * h * 2);
         for (std::uint32_t r = 0; r < h; ++r)
           Unpack10(&yb[static_cast<size_t>(r) * stride], w,
@@ -160,8 +166,8 @@ int main(int argc, char** argv) {
         }
       } else {
         std::vector<std::uint8_t> uvp;
-        Detile(y, w, h, h, &yout);
-        Detile(uv, w, h / 2, h / 2, &uvp);
+        Detile(y, w, h, col_h, &yout);
+        Detile(uv, w, h / 2, ccol_h, &uvp);
         uout.resize((w / 2) * (h / 2));
         vout.resize((w / 2) * (h / 2));
         for (std::uint32_t cy = 0; cy < h / 2; ++cy)
