@@ -31,6 +31,24 @@ namespace v4l2wc::h265 {
 // HEVC slice types (clause 7.4.7.1).
 enum class SliceType : uint32_t { kB = 0, kP = 1, kI = 2 };
 
+// Largest number of active references per list (num_ref_idx_lX_active_minus1 is
+// at most 14, so at most 15 entries, indices 0..14).
+inline constexpr uint32_t kMaxSliceRefs = 15;
+
+// pred_weight_table (clause 7.3.6.3), as raw syntax elements per list (0 = L0,
+// 1 = L1) and reference index. Present only for a weighted P or B slice; a
+// stateless decoder derives the final weights and offsets from these.
+struct PredWeightTable {
+  uint32_t luma_log2_weight_denom = 0;
+  int32_t delta_chroma_log2_weight_denom = 0;
+  bool luma_weight_flag[2][kMaxSliceRefs] = {};
+  int32_t delta_luma_weight[2][kMaxSliceRefs] = {};
+  int32_t luma_offset[2][kMaxSliceRefs] = {};
+  bool chroma_weight_flag[2][kMaxSliceRefs] = {};
+  int32_t delta_chroma_weight[2][kMaxSliceRefs][2] = {};
+  int32_t delta_chroma_offset[2][kMaxSliceRefs][2] = {};
+};
+
 // Fields the slice-segment header parse needs from the active SPS and PPS.
 struct SliceContext {
   SliceContext();
@@ -112,6 +130,9 @@ struct SliceHeader {
   // default.
   uint32_t num_ref_idx_l0_active_minus1 = 0;
   uint32_t num_ref_idx_l1_active_minus1 = 0;
+  // Populated only for a weighted P or B slice (see ctx.weighted_pred_flag /
+  // weighted_bipred_flag); otherwise left default.
+  PredWeightTable pred_weight;
 
   // NumPicTotalCurr (clause 7.4.7.2): the number of reference pictures used by
   // the current picture, which gates ref_pic_lists_modification and sizes its

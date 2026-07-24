@@ -69,33 +69,34 @@ bool SkipRefPicListsModification(BitReader* br, const SliceContext& ctx,
 }
 
 // One reference list's weight entries within pred_weight_table (clause
-// 7.3.6.3). num_active is num_ref_idx_lX_active_minus1.
-bool SkipPredWeightList(BitReader* br, uint32_t chroma_array_type,
-                        uint32_t num_active) {
-  bool luma_weight_flag[kMaxRefIdxDefault + 1] = {};
-  bool chroma_weight_flag[kMaxRefIdxDefault + 1] = {};
+// 7.3.6.3), stored into pwt->...[list]. num_active is
+// num_ref_idx_lX_active_minus1, bounded to kMaxRefIdxDefault (< kMaxSliceRefs)
+// before this is called, so the per-reference arrays cannot overflow.
+bool ParsePredWeightList(BitReader* br, uint32_t chroma_array_type,
+                         uint32_t num_active, int list, PredWeightTable* pwt) {
   for (uint32_t i = 0; i <= num_active; ++i) {
-    if (!br->ReadFlag(&luma_weight_flag[i])) {
+    if (!br->ReadFlag(&pwt->luma_weight_flag[list][i])) {
       return false;
     }
   }
   if (chroma_array_type != 0) {
     for (uint32_t i = 0; i <= num_active; ++i) {
-      if (!br->ReadFlag(&chroma_weight_flag[i])) {
+      if (!br->ReadFlag(&pwt->chroma_weight_flag[list][i])) {
         return false;
       }
     }
   }
-  int32_t ignore = 0;
   for (uint32_t i = 0; i <= num_active; ++i) {
-    if (luma_weight_flag[i]) {
-      if (!br->ReadSe(&ignore) || !br->ReadSe(&ignore)) {  // delta_luma_*
+    if (pwt->luma_weight_flag[list][i]) {
+      if (!br->ReadSe(&pwt->delta_luma_weight[list][i]) ||
+          !br->ReadSe(&pwt->luma_offset[list][i])) {
         return false;
       }
     }
-    if (chroma_weight_flag[i]) {
+    if (pwt->chroma_weight_flag[list][i]) {
       for (uint32_t j = 0; j < 2; ++j) {
-        if (!br->ReadSe(&ignore) || !br->ReadSe(&ignore)) {  // delta_chroma_*
+        if (!br->ReadSe(&pwt->delta_chroma_weight[list][i][j]) ||
+            !br->ReadSe(&pwt->delta_chroma_offset[list][i][j])) {
           return false;
         }
       }
@@ -104,28 +105,25 @@ bool SkipPredWeightList(BitReader* br, uint32_t chroma_array_type,
   return true;
 }
 
-// pred_weight_table (clause 7.3.6.3). Consumed and discarded.
-bool SkipPredWeightTable(BitReader* br, const SliceContext& ctx,
-                         const SliceHeader& sh) {
-  uint32_t luma_log2_weight_denom = 0;
-  if (!br->ReadUe(&luma_log2_weight_denom)) {
+// pred_weight_table (clause 7.3.6.3), stored into sh->pred_weight.
+bool ParsePredWeightTable(BitReader* br, const SliceContext& ctx,
+                          SliceHeader* sh) {
+  if (!br->ReadUe(&sh->pred_weight.luma_log2_weight_denom)) {
     return false;
   }
-  if (ctx.chroma_array_type != 0) {
-    int32_t delta_chroma_log2_weight_denom = 0;
-    if (!br->ReadSe(&delta_chroma_log2_weight_denom)) {
-      return false;
-    }
-  }
-  // Active counts are bounded to kMaxRefIdxDefault before this is called, so
-  // the per-list flag arrays cannot overflow.
-  if (!SkipPredWeightList(br, ctx.chroma_array_type,
-                          sh.num_ref_idx_l0_active_minus1)) {
+  if (ctx.chroma_array_type != 0 &&
+      !br->ReadSe(&sh->pred_weight.delta_chroma_log2_weight_denom)) {
     return false;
   }
-  if (sh.slice_type == SliceType::kB &&
-      !SkipPredWeightList(br, ctx.chroma_array_type,
-                          sh.num_ref_idx_l1_active_minus1)) {
+  if (!ParsePredWeightList(br, ctx.chroma_array_type,
+                           sh->num_ref_idx_l0_active_minus1, 0,
+                           &sh->pred_weight)) {
+    return false;
+  }
+  if (sh->slice_type == SliceType::kB &&
+      !ParsePredWeightList(br, ctx.chroma_array_type,
+                           sh->num_ref_idx_l1_active_minus1, 1,
+                           &sh->pred_weight)) {
     return false;
   }
   return true;
@@ -350,7 +348,7 @@ bool ParseSliceHeader(const uint8_t* rbsp, size_t size, NalUnitType nal_type,
     const bool weighted =
         (ctx.weighted_pred_flag && sh.slice_type == SliceType::kP) ||
         (ctx.weighted_bipred_flag && sh.slice_type == SliceType::kB);
-    if (weighted && !SkipPredWeightTable(&br, ctx, sh)) {
+    if (weighted && !ParsePredWeightTable(&br, ctx, &sh)) {
       return false;
     }
     // MaxNumMergeCand = 5 - five_minus_max_num_merge_cand, which must be 1..5.

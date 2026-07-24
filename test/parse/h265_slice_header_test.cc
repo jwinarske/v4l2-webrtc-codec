@@ -176,6 +176,12 @@ int main() {
     CHECK(sh.num_pic_total_curr == 1);
     CHECK(sh.slice_temporal_mvp_enabled_flag);
     CHECK(sh.slice_sao_luma_flag);
+    // The clip's PPS enables weighted prediction, so a P slice carries a
+    // pred_weight_table; libx265 signals the denominators but leaves every
+    // luma_weight_flag off (default weights).
+    CHECK(sh.pred_weight.luma_log2_weight_denom == 7);
+    CHECK(sh.pred_weight.delta_chroma_log2_weight_denom == -1);
+    CHECK(sh.pred_weight.luma_weight_flag[0][0] == false);
     CHECK(sh.slice_qp_delta == 7);
     CHECK(sh.slice_data_bit_offset_rbsp == 144);
     CHECK((sh.slice_data_bit_offset_rbsp & 7) == 0);
