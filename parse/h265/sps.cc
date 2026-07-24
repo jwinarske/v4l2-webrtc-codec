@@ -528,7 +528,10 @@ bool ParseSps(const uint8_t* rbsp, size_t size, Sps* out) {
     if (max_dec_pic_buffering_minus1 >= kMaxRefPics) {
       return false;  // MaxDpbSize is at most 16
     }
+    // Keep the highest sub-layer's values (the last iteration): they bound the
+    // DPB and the output-reorder depth used by the bumping process (C.5.2.2).
     sps.sps_max_dec_pic_buffering_minus1 = max_dec_pic_buffering_minus1;
+    sps.sps_max_num_reorder_pics = max_num_reorder_pics;
   }
 
   uint32_t log2_min_cb_minus3 = 0;

@@ -55,6 +55,7 @@ void FillSps(const h265::Sps& s, v4l2_ctrl_hevc_sps* o) {
       static_cast<__u8>(s.log2_max_pic_order_cnt_lsb - 4);
   o->sps_max_dec_pic_buffering_minus1 =
       static_cast<__u8>(s.sps_max_dec_pic_buffering_minus1);
+  o->sps_max_num_reorder_pics = static_cast<__u8>(s.sps_max_num_reorder_pics);
   o->log2_min_luma_coding_block_size_minus3 =
       static_cast<__u8>(s.log2_min_cb_size - 3);
   o->log2_diff_max_min_luma_coding_block_size =
@@ -400,20 +401,22 @@ bool V4l2StatelessH265Decoder::EnsureConfigured(const h265::Sps& sps) {
   v4l2_buf_type ct = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
   if (Xioctl(video_fd_, VIDIOC_STREAMON, &ot) < 0) return false;
   if (Xioctl(video_fd_, VIDIOC_STREAMON, &ct) < 0) return false;
+  reorder_depth_ = sps.sps_max_num_reorder_pics;
   configured_ = true;
   V4L2WC_LOG(V4L2WC_INFO) << "v4l2-h265: configured " << coded_w_ << "x"
-                          << coded_h_ << " pool=" << pool_size_;
+                          << coded_h_ << " pool=" << pool_size_
+                          << " reorder=" << reorder_depth_;
   return true;
 }
 
-int V4l2StatelessH265Decoder::PickFreeCapture() {
-  for (std::uint32_t i = 0; i < captures_.size(); ++i) {
-    Capture& c = captures_[i];
-    if (!c.queued && !c.is_reference && !c.checked_out &&
-        static_cast<int>(i) != ready_capture_)
-      return static_cast<int>(i);
-  }
-  return -1;
+// Re-queues a capture buffer to the driver once it is no longer needed for
+// reference, output, or hand-out.
+void V4l2StatelessH265Decoder::MaybeRequeue(int index) {
+  const Capture& c = captures_[index];
+  if (c.queued || c.is_reference || c.checked_out || c.pending_output) return;
+  for (int r : output_ready_)
+    if (r == index) return;
+  RequeueCapture(index);
 }
 
 void V4l2StatelessH265Decoder::RequeueCapture(int index) {
@@ -854,18 +857,34 @@ bool V4l2StatelessH265Decoder::DecodePicture(
     dpb_.erase(dpb_.begin() + oldest);
   }
 
-  // Park as the ready output; re-queue any now-free capture buffers.
-  const int prev_ready = ready_capture_;
-  ready_capture_ = cap;
-  have_ready_ = true;
-  if (prev_ready >= 0 && prev_ready != cap &&
-      !captures_[prev_ready].is_reference && !captures_[prev_ready].checked_out)
-    RequeueCapture(prev_ready);
+  // Mark the picture needed for output (unless suppressed), then run the
+  // bumping process so display order comes out in increasing POC.
+  captures_[cap].pending_output = sh.pic_output_flag;
+  captures_[cap].poc = poc;
+  Bump(/*flush=*/false);
   for (std::uint32_t i = 0; i < captures_.size(); ++i)
-    if (!captures_[i].queued && !captures_[i].is_reference &&
-        !captures_[i].checked_out && static_cast<int>(i) != ready_capture_)
-      RequeueCapture(static_cast<int>(i));
+    MaybeRequeue(static_cast<int>(i));
   return true;
+}
+
+void V4l2StatelessH265Decoder::Bump(bool flush) {
+  const std::size_t limit = flush ? 0 : reorder_depth_;
+  while (true) {
+    int min_poc = 0;
+    int min_cap = -1;
+    std::size_t pending = 0;
+    for (std::uint32_t i = 0; i < captures_.size(); ++i) {
+      if (!captures_[i].pending_output) continue;
+      ++pending;
+      if (min_cap < 0 || captures_[i].poc < min_poc) {
+        min_poc = captures_[i].poc;
+        min_cap = static_cast<int>(i);
+      }
+    }
+    if (min_cap < 0 || pending <= limit) break;
+    captures_[min_cap].pending_output = false;
+    output_ready_.push_back(min_cap);  // pushed in increasing POC
+  }
 }
 
 SubmitResult V4l2StatelessH265Decoder::SubmitBitstream(
@@ -924,10 +943,11 @@ bool V4l2StatelessH265Decoder::ExportCapture(int index) {
 }
 
 bool V4l2StatelessH265Decoder::Acquire(V4l2DmaFrame* out) {
-  if (!have_ready_ || ready_capture_ < 0) return false;
-  const int cap = ready_capture_;
+  if (output_ready_.empty()) return false;
+  const int cap = output_ready_.front();  // smallest POC first
+  output_ready_.erase(output_ready_.begin());
   if (!ExportCapture(cap)) {
-    have_ready_ = false;
+    MaybeRequeue(cap);
     return false;
   }
   Capture& c = captures_[cap];
@@ -944,31 +964,30 @@ bool V4l2StatelessH265Decoder::Acquire(V4l2DmaFrame* out) {
     out->pitches[p] = c.pitches[p];
   }
   out->timestamp = c.timestamp;
-  have_ready_ = false;
   return true;
 }
 
 void V4l2StatelessH265Decoder::Release(std::uint32_t capture_index) {
   if (capture_index >= captures_.size()) return;
-  Capture& c = captures_[capture_index];
-  c.checked_out = false;
-  if (!c.is_reference && static_cast<int>(capture_index) != ready_capture_)
-    RequeueCapture(static_cast<int>(capture_index));
+  captures_[capture_index].checked_out = false;
+  MaybeRequeue(static_cast<int>(capture_index));
 }
 
 void V4l2StatelessH265Decoder::Flush() {
   for (auto& r : dpb_) captures_[r.capture].is_reference = false;
   dpb_.clear();
+  output_ready_.clear();
+  for (auto& c : captures_) c.pending_output = false;
   prev_poc_lsb_ = 0;
   prev_poc_msb_ = 0;
   seen_first_picture_ = false;
   eos_seen_ = false;
-  have_ready_ = false;
-  ready_capture_ = -1;
   for (std::uint32_t i = 0; i < captures_.size(); ++i)
     if (!captures_[i].checked_out) RequeueCapture(static_cast<int>(i));
 }
 
-void V4l2StatelessH265Decoder::Drain() {}
+// End of sequence: flush every buffered picture to the output queue in POC
+// order so Acquire can drain them.
+void V4l2StatelessH265Decoder::Drain() { Bump(/*flush=*/true); }
 
 }  // namespace v4l2wc

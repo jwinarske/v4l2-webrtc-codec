@@ -141,6 +141,10 @@ int main(int argc, char** argv) {
     V4l2DmaFrame f;
     while (dec->Acquire(&f)) pump(f);
   }
+  // End of stream: flush the reorder buffer and drain the remaining frames.
+  dec->Drain();
+  V4l2DmaFrame f;
+  while (dec->Acquire(&f)) pump(f);
   if (fout) std::fclose(fout);
   std::fprintf(stderr, "=== decoded %d frames ===\n", frames);
   return frames > 0 ? 0 : 1;

@@ -62,9 +62,13 @@ class V4l2StatelessH265Decoder : public IDmaDecoder {
                      std::uint64_t timestamp);
   int ComputePoc(const h265::SliceHeader& sh, const h265::Nal& nal,
                  bool no_rasl_output);
-  int PickFreeCapture();
   void RequeueCapture(int index);
+  void MaybeRequeue(int index);
   bool ExportCapture(int index);
+  // Output-order "bumping" (clause C.5.2.2): move pictures marked needed for
+  // output to the ready queue in increasing POC while more than the reorder
+  // depth are held back; `flush` empties it (drain / end of sequence).
+  void Bump(bool flush);
 
   // An mmap'd multi-planar V4L2 buffer.
   struct MappedBuf {
@@ -77,10 +81,12 @@ class V4l2StatelessH265Decoder : public IDmaDecoder {
   // A CAPTURE buffer and its decode / reference / output state.
   struct Capture {
     MappedBuf map;
-    bool queued = false;        // handed to the driver, awaiting decode
-    bool is_reference = false;  // held by the DPB
-    bool checked_out = false;   // Acquire'd, awaiting Release
-    std::uint64_t timestamp = 0;
+    bool queued = false;          // handed to the driver, awaiting decode
+    bool is_reference = false;    // held by the DPB
+    bool checked_out = false;     // Acquire'd, awaiting Release
+    bool pending_output = false;  // decoded, not yet handed out (needs output)
+    int poc = 0;                  // output order key
+    std::uint64_t timestamp = 0;  // passthrough presentation timestamp
     // Exported dma-buf, one fd per plane, valid once ExportCapture ran.
     int fd[V4l2DmaFrame::kMaxPlanes] = {-1, -1, -1, -1};
     std::uint32_t offsets[V4l2DmaFrame::kMaxPlanes] = {0, 0, 0, 0};
@@ -112,6 +118,9 @@ class V4l2StatelessH265Decoder : public IDmaDecoder {
   std::vector<MappedBuf> output_bufs_;  // coded-input OUTPUT queue
   std::vector<Capture> captures_;       // decoded CAPTURE queue
   std::vector<RefPic> dpb_;
+  // Capture indices ready to hand out, kept in increasing POC (front smallest).
+  std::vector<int> output_ready_;
+  std::uint32_t reorder_depth_ = 0;  // sps_max_num_reorder_pics
 
   // POC derivation state (clause 8.3.1).
   int prev_poc_lsb_ = 0, prev_poc_msb_ = 0;
@@ -121,9 +130,6 @@ class V4l2StatelessH265Decoder : public IDmaDecoder {
   // A monotonically increasing tag put on each OUTPUT buffer so references
   // resolve by timestamp regardless of the passthrough presentation timestamp.
   std::uint64_t next_tag_ = 1;
-
-  bool have_ready_ = false;
-  int ready_capture_ = -1;
 };
 
 }  // namespace v4l2wc

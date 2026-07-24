@@ -90,6 +90,7 @@ struct Sps {
   uint32_t bit_depth_chroma = 8;            // bit_depth_chroma_minus8 + 8
   uint32_t log2_max_pic_order_cnt_lsb = 4;  // _minus4 + 4; sizes a slice u(v)
   uint32_t sps_max_dec_pic_buffering_minus1 = 0;  // highest sub-layer
+  uint32_t sps_max_num_reorder_pics = 0;  // output-reorder depth (C.5.2.2)
 
   // Coding-tree geometry, derived. The slice-segment header's
   // slice_segment_address is u(Ceil(Log2(pic_size_in_ctbs))).
