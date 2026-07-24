@@ -348,7 +348,7 @@ bool VaapiH264Decoder::DecodeSlice(const h264::Nal& nal) {
 
 SubmitResult VaapiH264Decoder::SubmitBitstream(const std::uint8_t* data,
                                                std::size_t size,
-                                               std::uint64_t rtp_timestamp) {
+                                               std::uint64_t timestamp) {
   auto nals = h264::ParseAnnexB(data, size);
   for (auto& n : nals) {
     if (n.type == h264::NalUnitType::kSps) {
@@ -379,15 +379,15 @@ SubmitResult VaapiH264Decoder::SubmitBitstream(const std::uint8_t* data,
                have_sps_ && have_pps_) {
       if (!EnsureConfigured(sps_)) return SubmitResult::kError;
       if (!DecodeSlice(n)) return SubmitResult::kError;
-      if (have_ready_) slots_[ready_slot_].rtp = rtp_timestamp;
+      if (have_ready_) slots_[ready_slot_].timestamp = timestamp;
     }
   }
   return SubmitResult::kOk;
 }
 
-void VaapiH264Decoder::ExportSlot(std::uint32_t slot, std::uint64_t rtp) {
+void VaapiH264Decoder::ExportSlot(std::uint32_t slot, std::uint64_t timestamp) {
   Slot& s = slots_[slot];
-  s.rtp = rtp;
+  s.timestamp = timestamp;
   // Export once and keep the fd for the pool's lifetime, the way the V4L2
   // engine hands out its VIDIOC_EXPBUF fds. Consumers cache dma-buf imports
   // keyed on the fd, so re-exporting per frame would recycle fd numbers across
@@ -413,7 +413,7 @@ void VaapiH264Decoder::ExportSlot(std::uint32_t slot, std::uint64_t rtp) {
     s.offsets[p] = d.layers[0].offset[p];
     s.pitches[p] = d.layers[0].pitch[p];
   }
-  s.rtp = rtp;
+  s.timestamp = timestamp;
   // Close any extra objects (single-object NV12 expected; be safe).
   for (std::uint32_t i = 1; i < d.num_objects; ++i) ::close(d.objects[i].fd);
 }
@@ -421,7 +421,7 @@ void VaapiH264Decoder::ExportSlot(std::uint32_t slot, std::uint64_t rtp) {
 bool VaapiH264Decoder::Acquire(V4l2DmaFrame* out) {
   if (!have_ready_) return false;
   std::uint32_t slot = ready_slot_;
-  ExportSlot(slot, slots_[slot].rtp);
+  ExportSlot(slot, slots_[slot].timestamp);
   if (slots_[slot].fd < 0) {
     have_ready_ = false;
     return false;
@@ -439,7 +439,7 @@ bool VaapiH264Decoder::Acquire(V4l2DmaFrame* out) {
     out->offsets[p] = s.offsets[p];
     out->pitches[p] = s.pitches[p];
   }
-  out->rtp_timestamp = s.rtp;
+  out->timestamp = s.timestamp;
   have_ready_ = false;
   return true;
 }

@@ -47,7 +47,7 @@ class V4l2M2mDecoder : public IDmaDecoder {
 
   // Copies a coded access unit into a free OUTPUT buffer and queues it.
   SubmitResult SubmitBitstream(const std::uint8_t* data, std::size_t size,
-                               std::uint64_t rtp_timestamp) override;
+                               std::uint64_t timestamp) override;
 
   // Pumps events and dequeues completed buffers without blocking: reclaims
   // OUTPUT buffers, sets up CAPTURE on the first SOURCE_CHANGE, and parks the
@@ -110,7 +110,7 @@ class V4l2M2mDecoder : public IDmaDecoder {
 
   bool have_ready_ = false;
   std::uint32_t ready_index_ = 0;
-  std::uint64_t ready_rtp_ = 0;
+  std::uint64_t ready_timestamp_ = 0;
 };
 
 }  // namespace v4l2wc

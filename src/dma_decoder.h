@@ -33,7 +33,8 @@ struct V4l2DmaFrame {
   std::array<int, kMaxPlanes> fds{-1, -1, -1, -1};
   std::array<std::uint32_t, kMaxPlanes> offsets{0, 0, 0, 0};
   std::array<std::uint32_t, kMaxPlanes> pitches{0, 0, 0, 0};
-  std::uint64_t rtp_timestamp = 0;  // opaque passthrough token (frame RTP ts)
+  std::uint64_t timestamp = 0;  // opaque passthrough: a PTS for HLS, an RTP ts
+                                // for WebRTC; the engine never interprets it
 };
 
 // What a Drive() pass found. A resolution change is not an error: the stream
@@ -60,7 +61,7 @@ class IDmaDecoder {
   // Feed one coded access unit.
   virtual SubmitResult SubmitBitstream(const std::uint8_t* data,
                                        std::size_t size,
-                                       std::uint64_t rtp_timestamp) = 0;
+                                       std::uint64_t timestamp) = 0;
   // Pump without blocking.
   virtual DriveResult Drive() = 0;
   // Hand out the newest ready frame as borrowed dma-buf fds; false if none.

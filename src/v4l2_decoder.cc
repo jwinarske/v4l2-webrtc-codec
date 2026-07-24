@@ -154,10 +154,10 @@ void V4l2Decoder::DeliverReadyFrames() {
     }
 
     // V4L2 copies the OUTPUT buffer timestamp onto the matching CAPTURE buffer,
-    // so rtp_timestamp carries the RTP timestamp we stored when this frame's
+    // so f.timestamp carries the RTP timestamp we stored when this frame's
     // bitstream was submitted -- the identity of the frame that actually popped
     // out, which (with pipeline depth) is not the just-submitted one.
-    const uint32_t rtp_timestamp = static_cast<uint32_t>(f.rtp_timestamp);
+    const uint32_t rtp_timestamp = static_cast<uint32_t>(f.timestamp);
     int64_t render_time_ms = 0;
     if (auto it = render_time_by_rtp_.find(rtp_timestamp);
         it != render_time_by_rtp_.end()) {
