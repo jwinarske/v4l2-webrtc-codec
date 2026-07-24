@@ -14,7 +14,8 @@
 // OUTPUT buffer they were decoded from; a CAPTURE buffer holding a reference is
 // kept out of the free pool until the DPB evicts it.
 //
-// Intra and inter (P / B) HEVC Main 4:2:0 is supported. Long-term references,
+// Intra and inter (P / B) HEVC Main and Main 10 (8/10-bit 4:2:0) are
+// supported, in display order. Long-term references,
 // reference-list modification, tiles and scaling lists are marshalled the same
 // way the VAAPI engine marshals them.
 #ifndef V4L2WC_SRC_V4L2_STATELESS_H265_DECODER_H_

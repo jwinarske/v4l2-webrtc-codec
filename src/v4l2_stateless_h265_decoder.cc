@@ -286,10 +286,11 @@ V4l2StatelessH265Decoder::~V4l2StatelessH265Decoder() {
 
 bool V4l2StatelessH265Decoder::EnsureConfigured(const h265::Sps& sps) {
   if (configured_) return true;
-  if (sps.bit_depth_luma != 8 || sps.chroma_format_idc != 1) {
+  if ((sps.bit_depth_luma != 8 && sps.bit_depth_luma != 10) ||
+      sps.chroma_format_idc != 1) {
     V4L2WC_LOG(V4L2WC_WARNING)
-        << "v4l2-h265: only 8-bit 4:2:0 configured (bd=" << sps.bit_depth_luma
-        << " cfmt=" << sps.chroma_format_idc << ")";
+        << "v4l2-h265: only 8/10-bit 4:2:0 configured (bd="
+        << sps.bit_depth_luma << " cfmt=" << sps.chroma_format_idc << ")";
     return false;
   }
   coded_w_ = sps.pic_width_in_luma_samples;
@@ -347,15 +348,24 @@ bool V4l2StatelessH265Decoder::EnsureConfigured(const h265::Sps& sps) {
     output_bufs_[i].length[0] = pl[0].length;
   }
 
-  // CAPTURE (decoded) queue: learn the driver's fourcc, then set coded dims.
+  // CAPTURE (decoded) queue: the driver defaults to the 8-bit column-tiled
+  // format, so a 10-bit stream needs its column-tiled counterpart requested
+  // explicitly (the stateless driver cannot know the bit depth itself).
   v4l2_format gfmt{};
   gfmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
   if (Xioctl(video_fd_, VIDIOC_G_FMT, &gfmt) < 0) return false;
+  const std::uint32_t nc12 = v4l2_fourcc('N', 'c', '1', '2');  // 8-bit col128
+  const std::uint32_t nc30 = v4l2_fourcc('N', 'c', '3', '0');  // 10-bit col128
+  const std::uint32_t want_fourcc =
+      coded_bit_depth_ == 10
+          ? nc30
+          : (gfmt.fmt.pix_mp.pixelformat != 0 ? gfmt.fmt.pix_mp.pixelformat
+                                              : nc12);
   v4l2_format cfmt{};
   cfmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
   cfmt.fmt.pix_mp.width = coded_w_;
   cfmt.fmt.pix_mp.height = coded_h_;
-  cfmt.fmt.pix_mp.pixelformat = gfmt.fmt.pix_mp.pixelformat;
+  cfmt.fmt.pix_mp.pixelformat = want_fourcc;
   cfmt.fmt.pix_mp.num_planes = 1;
   cfmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
   if (Xioctl(video_fd_, VIDIOC_S_FMT, &cfmt) < 0) return false;
@@ -404,7 +414,8 @@ bool V4l2StatelessH265Decoder::EnsureConfigured(const h265::Sps& sps) {
   reorder_depth_ = sps.sps_max_num_reorder_pics;
   configured_ = true;
   V4L2WC_LOG(V4L2WC_INFO) << "v4l2-h265: configured " << coded_w_ << "x"
-                          << coded_h_ << " pool=" << pool_size_
+                          << coded_h_ << " " << coded_bit_depth_
+                          << "-bit pool=" << pool_size_
                           << " reorder=" << reorder_depth_;
   return true;
 }

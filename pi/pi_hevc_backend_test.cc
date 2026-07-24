@@ -8,6 +8,7 @@
 // software reference. Cross-built for aarch64 with emb; run on the Pi.
 
 #include <fcntl.h>
+#include <linux/videodev2.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -72,6 +73,25 @@ void Detile(const std::uint8_t* t, std::uint32_t w_bytes, std::uint32_t h,
           t[(bx / 128) * 128 * col_h + y * 128 + (bx % 128)];
 }
 
+// Unpacks a Broadcom SAND 10-bit (Nc30) row: each little-endian 32-bit word
+// holds three 10-bit samples (bits [0:9], [10:19], [20:29]). Emits `n` 16-bit
+// little-endian samples, matching ffmpeg yuv420p10le.
+void Unpack10(const std::uint8_t* row, std::uint32_t n, std::uint8_t* out16) {
+  std::uint32_t s = 0;
+  for (std::uint32_t g = 0; s < n; ++g) {
+    const std::uint32_t word =
+        static_cast<std::uint32_t>(row[g * 4]) |
+        (static_cast<std::uint32_t>(row[g * 4 + 1]) << 8) |
+        (static_cast<std::uint32_t>(row[g * 4 + 2]) << 16) |
+        (static_cast<std::uint32_t>(row[g * 4 + 3]) << 24);
+    for (int k = 0; k < 3 && s < n; ++k, ++s) {
+      const std::uint32_t v = (word >> (10 * k)) & 0x3ff;
+      out16[2 * s] = static_cast<std::uint8_t>(v & 0xff);
+      out16[2 * s + 1] = static_cast<std::uint8_t>((v >> 8) & 0xff);
+    }
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -99,7 +119,7 @@ int main(int argc, char** argv) {
   int frames = 0;
   std::uint64_t ts = 0;
   auto pump = [&](V4l2DmaFrame& f) {
-    const std::uint32_t w = f.width, h = f.height, stride = f.pitches[0];
+    const std::uint32_t w = f.width, h = f.height;
     struct stat st0{};
     struct stat st1{};
     fstat(f.fds[0], &st0);
@@ -109,25 +129,51 @@ int main(int argc, char** argv) {
     auto* uv = static_cast<std::uint8_t*>(
         mmap(nullptr, st1.st_size, PROT_READ, MAP_SHARED, f.fds[1], 0));
     if (y != MAP_FAILED && uv != MAP_FAILED) {
-      // The tiled column height is the format's plane height, not the dma-buf
-      // size (which is page-padded). For NV12_COL128 at these sizes that is the
-      // frame height (luma) and half (chroma); production code would read the
-      // column height from the SAND128 DRM modifier.
-      const std::uint32_t luma_col_h = h;
-      const std::uint32_t chroma_col_h = h / 2;
-      std::vector<std::uint8_t> yp, uvp, u((w / 2) * (h / 2)),
-          v((w / 2) * (h / 2));
-      Detile(y, w, h, luma_col_h, &yp);
-      Detile(uv, w, h / 2, chroma_col_h, &uvp);
-      for (std::uint32_t cy = 0; cy < h / 2; ++cy)
-        for (std::uint32_t cx = 0; cx < w / 2; ++cx) {
-          u[cy * (w / 2) + cx] = uvp[cy * w + 2 * cx];
-          v[cy * (w / 2) + cx] = uvp[cy * w + 2 * cx + 1];
+      // The tiled column height is the format's plane height (luma) and half
+      // (chroma); production code would read it from the SAND DRM modifier.
+      const std::uint32_t stride = f.pitches[0];
+      const bool ten = f.drm_fourcc == v4l2_fourcc('N', 'c', '3', '0');
+      std::vector<std::uint8_t> yout, uout, vout;
+      if (ten) {
+        // Packed SAND 10-bit: detile the packed bytes, then unpack 3-per-4 into
+        // 16-bit samples; chroma unpacks the interleaved UV stream (w samples
+        // per row) and de-interleaves it.
+        std::vector<std::uint8_t> yb, cb;
+        Detile(y, stride, h, h, &yb);
+        Detile(uv, stride, h / 2, h / 2, &cb);
+        yout.resize(static_cast<size_t>(w) * h * 2);
+        for (std::uint32_t r = 0; r < h; ++r)
+          Unpack10(&yb[static_cast<size_t>(r) * stride], w,
+                   &yout[static_cast<size_t>(r) * w * 2]);
+        uout.resize((w / 2) * (h / 2) * 2);
+        vout.resize((w / 2) * (h / 2) * 2);
+        std::vector<std::uint8_t> crow(static_cast<size_t>(w) * 2);
+        for (std::uint32_t cy = 0; cy < h / 2; ++cy) {
+          Unpack10(&cb[static_cast<size_t>(cy) * stride], w, crow.data());
+          for (std::uint32_t cx = 0; cx < w / 2; ++cx) {
+            const size_t di = (static_cast<size_t>(cy) * (w / 2) + cx) * 2;
+            uout[di] = crow[(2 * cx) * 2];
+            uout[di + 1] = crow[(2 * cx) * 2 + 1];
+            vout[di] = crow[(2 * cx + 1) * 2];
+            vout[di + 1] = crow[(2 * cx + 1) * 2 + 1];
+          }
         }
+      } else {
+        std::vector<std::uint8_t> uvp;
+        Detile(y, w, h, h, &yout);
+        Detile(uv, w, h / 2, h / 2, &uvp);
+        uout.resize((w / 2) * (h / 2));
+        vout.resize((w / 2) * (h / 2));
+        for (std::uint32_t cy = 0; cy < h / 2; ++cy)
+          for (std::uint32_t cx = 0; cx < w / 2; ++cx) {
+            uout[cy * (w / 2) + cx] = uvp[cy * w + 2 * cx];
+            vout[cy * (w / 2) + cx] = uvp[cy * w + 2 * cx + 1];
+          }
+      }
       if (fout) {
-        std::fwrite(yp.data(), 1, yp.size(), fout);
-        std::fwrite(u.data(), 1, u.size(), fout);
-        std::fwrite(v.data(), 1, v.size(), fout);
+        std::fwrite(yout.data(), 1, yout.size(), fout);
+        std::fwrite(uout.data(), 1, uout.size(), fout);
+        std::fwrite(vout.data(), 1, vout.size(), fout);
       }
       ++frames;
     }
