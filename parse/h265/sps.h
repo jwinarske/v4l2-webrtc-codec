@@ -90,6 +90,10 @@ struct Sps {
 
   bool long_term_ref_pics_present_flag = false;
   uint32_t num_long_term_ref_pics_sps = 0;
+  // used_by_curr_pic_lt_sps_flag per SPS long-term entry; size() is
+  // num_long_term_ref_pics_sps. The slice header reads these to compute
+  // NumPicTotalCurr for a long-term reference chosen by lt_idx_sps.
+  std::vector<bool> used_by_curr_pic_lt_sps;
   bool sps_temporal_mvp_enabled_flag = false;
   bool strong_intra_smoothing_enabled_flag = false;
 

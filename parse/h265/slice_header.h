@@ -46,6 +46,9 @@ struct SliceContext {
   bool sps_temporal_mvp_enabled_flag = false;
   bool long_term_ref_pics_present_flag = false;
   uint32_t num_long_term_ref_pics_sps = 0;
+  // used_by_curr_pic_lt_sps_flag per SPS long-term entry (from the SPS), used
+  // to derive NumPicTotalCurr. size() is num_long_term_ref_pics_sps.
+  std::vector<bool> used_by_curr_pic_lt_sps;
   // The SPS-defined short-term RPSs. size() is num_short_term_ref_pic_sets.
   std::vector<ShortTermRps> short_term_rps;
 
@@ -55,6 +58,17 @@ struct SliceContext {
   bool output_flag_present_flag = false;
   uint32_t num_ref_idx_l0_default_active_minus1 = 0;
   uint32_t num_ref_idx_l1_default_active_minus1 = 0;
+  bool cabac_init_present_flag = false;
+  bool weighted_pred_flag = false;
+  bool weighted_bipred_flag = false;
+  bool pps_slice_chroma_qp_offsets_present_flag = false;
+  bool deblocking_filter_override_enabled_flag = false;
+  bool pps_deblocking_filter_disabled_flag = false;
+  bool pps_loop_filter_across_slices_enabled_flag = false;
+  bool tiles_enabled_flag = false;
+  bool entropy_coding_sync_enabled_flag = false;
+  bool lists_modification_present_flag = false;
+  bool slice_segment_header_extension_present_flag = false;
 };
 
 struct SliceHeader {
@@ -94,6 +108,31 @@ struct SliceHeader {
   // default.
   uint32_t num_ref_idx_l0_active_minus1 = 0;
   uint32_t num_ref_idx_l1_active_minus1 = 0;
+
+  // NumPicTotalCurr (clause 7.4.7.2): the number of reference pictures used by
+  // the current picture, which gates ref_pic_lists_modification and sizes its
+  // list_entry fields.
+  uint32_t num_pic_total_curr = 0;
+  bool mvd_l1_zero_flag = false;
+  bool cabac_init_flag = false;
+  bool collocated_from_l0_flag = true;
+  uint32_t collocated_ref_idx = 0;
+  uint32_t five_minus_max_num_merge_cand = 0;
+
+  int32_t slice_qp_delta = 0;
+  int32_t slice_cb_qp_offset = 0;
+  int32_t slice_cr_qp_offset = 0;
+  bool slice_deblocking_filter_disabled_flag = false;
+  int32_t slice_beta_offset_div2 = 0;
+  int32_t slice_tc_offset_div2 = 0;
+  bool slice_loop_filter_across_slices_enabled_flag = false;
+  uint32_t num_entry_point_offsets = 0;
+
+  // Bit offset within the RBSP at which slice_data() begins, i.e. just past the
+  // header's byte_alignment(). Always a multiple of 8. Convert to raw-NAL bit
+  // space with RbspToRawBitOffset() for a stateless decoder's
+  // slice_data_bit_offset.
+  uint32_t slice_data_bit_offset_rbsp = 0;
 };
 
 // Parses a slice-segment header from its RBSP (NAL header stripped,

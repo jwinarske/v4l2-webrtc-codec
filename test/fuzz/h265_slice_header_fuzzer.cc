@@ -40,11 +40,26 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   ctx.dependent_slice_segments_enabled_flag = (cfg0 >> 7) & 1;
   ctx.num_extra_slice_header_bits = (cfg1 >> 5) & 7;
   ctx.output_flag_present_flag = (cfg0 >> 6) & 1;
+  // The remaining PPS-derived flags gate the header tail (ref-list
+  // modification, weighted prediction, tiles / wavefront entry points,
+  // deblocking override, extension). Spread them across a fourth config byte.
+  const uint8_t cfg3 = data[3];
+  ctx.cabac_init_present_flag = cfg3 & 1;
+  ctx.weighted_pred_flag = (cfg3 >> 1) & 1;
+  ctx.weighted_bipred_flag = (cfg3 >> 2) & 1;
+  ctx.pps_slice_chroma_qp_offsets_present_flag = (cfg3 >> 3) & 1;
+  ctx.deblocking_filter_override_enabled_flag = (cfg3 >> 4) & 1;
+  ctx.pps_loop_filter_across_slices_enabled_flag = (cfg3 >> 5) & 1;
+  ctx.tiles_enabled_flag = (cfg3 >> 6) & 1;
+  ctx.entropy_coding_sync_enabled_flag = (cfg3 >> 7) & 1;
+  ctx.lists_modification_present_flag = cfg0 & 1;
+  ctx.slice_segment_header_extension_present_flag = (cfg0 >> 1) & 1;
   // A couple of SPS-defined short-term RPSs, so the SPS-index and single-set
   // branches are reachable.
   v4l2wc::h265::ShortTermRps rps;
   rps.num_negative_pics = 1;
   rps.num_delta_pocs = 1;
+  rps.used_s0[0] = true;
   ctx.short_term_rps = {rps, rps};
 
   v4l2wc::h265::SliceHeader sh;
@@ -58,6 +73,12 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     }
     if (!sh.first_slice_segment_in_pic_flag &&
         sh.slice_segment_address >= ctx.pic_size_in_ctbs) {
+      __builtin_trap();
+    }
+    // When the full header was parsed (not a dependent-segment early return),
+    // slice_data starts on a byte boundary.
+    if (!sh.dependent_slice_segment_flag &&
+        (sh.slice_data_bit_offset_rbsp & 7) != 0) {
       __builtin_trap();
     }
   }

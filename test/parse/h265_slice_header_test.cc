@@ -105,15 +105,36 @@ int main() {
       pps.num_ref_idx_l0_default_active_minus1;
   ctx.num_ref_idx_l1_default_active_minus1 =
       pps.num_ref_idx_l1_default_active_minus1;
+  ctx.cabac_init_present_flag = pps.cabac_init_present_flag;
+  ctx.weighted_pred_flag = pps.weighted_pred_flag;
+  ctx.weighted_bipred_flag = pps.weighted_bipred_flag;
+  ctx.pps_slice_chroma_qp_offsets_present_flag =
+      pps.pps_slice_chroma_qp_offsets_present_flag;
+  ctx.deblocking_filter_override_enabled_flag =
+      pps.deblocking_filter_override_enabled_flag;
+  ctx.pps_deblocking_filter_disabled_flag =
+      pps.pps_deblocking_filter_disabled_flag;
+  ctx.pps_loop_filter_across_slices_enabled_flag =
+      pps.pps_loop_filter_across_slices_enabled_flag;
+  ctx.tiles_enabled_flag = pps.tiles_enabled_flag;
+  ctx.entropy_coding_sync_enabled_flag = pps.entropy_coding_sync_enabled_flag;
+  ctx.lists_modification_present_flag = pps.lists_modification_present_flag;
+  ctx.slice_segment_header_extension_present_flag =
+      pps.slice_segment_header_extension_present_flag;
 
   // The clip is 4:4:4, so SAO chroma is present alongside SAO luma.
   CHECK(ctx.chroma_array_type != 0);
+  // WPP is on, so the header carries entry-point offsets (one per CTB row past
+  // the first): 720 / 64 = 12 CTB rows -> 11 entry points.
+  CHECK(ctx.entropy_coding_sync_enabled_flag);
 
   // IDR (IDR_N_LP, type 20): an IRAP, so no_output_of_prior_pics is read; the
   // POC and RPS syntax is skipped for an IDR. Slice type I.
   {
-    auto n = WrapNal({0x28, 0x01, 0xaf, 0x1d, 0x18, 0x2a, 0x67, 0xaf, 0x2d,
-                      0xda, 0x1d, 0x36, 0x14, 0x8b, 0x89, 0xcf});
+    auto n = WrapNal({0x28, 0x01, 0xaf, 0x1d, 0x18, 0x2a, 0x67, 0xaf,
+                      0x2d, 0xda, 0x1d, 0x36, 0x14, 0x8b, 0x89, 0xcf,
+                      0xb2, 0xa6, 0x28, 0x68, 0xf7, 0xcf, 0x80, 0xff,
+                      0xfb, 0x68, 0xc7, 0xfc, 0x53, 0x87, 0xf5, 0xa1});
     CHECK(n.size() == 1);
     SliceHeader sh;
     const bool ok = ParseSliceHeader(n[0].rbsp.data(), n[0].rbsp.size(),
@@ -123,16 +144,23 @@ int main() {
     CHECK(sh.slice_type == SliceType::kI);
     CHECK(sh.slice_pic_order_cnt_lsb == 0);  // skipped for IDR
     CHECK(sh.current_rps.num_delta_pocs == 0);
+    CHECK(sh.num_pic_total_curr == 0);
     CHECK(sh.slice_temporal_mvp_enabled_flag == false);  // skipped for IDR
     CHECK(sh.slice_sao_luma_flag);
     CHECK(sh.slice_sao_chroma_flag);
+    CHECK(sh.num_entry_point_offsets == 11);  // 720 / 64 = 12 CTB rows
+    CHECK(sh.slice_qp_delta == 7);
+    CHECK(sh.slice_data_bit_offset_rbsp == 144);
+    CHECK((sh.slice_data_bit_offset_rbsp & 7) == 0);  // byte-aligned
   }
 
   // P slice (TRAIL_R, type 1): POC 2, inline explicit RPS with one negative
   // reference, temporal MVP on.
   {
-    auto n = WrapNal({0x02, 0x01, 0xd0, 0x11, 0x57, 0x84, 0x31, 0x8e, 0x0c,
-                      0x38, 0x61, 0x01, 0x42, 0x05, 0x0c, 0x18});
+    auto n = WrapNal({0x02, 0x01, 0xd0, 0x11, 0x57, 0x84, 0x31, 0x8e,
+                      0x0c, 0x38, 0x61, 0x01, 0x42, 0x05, 0x0c, 0x18,
+                      0x2e, 0xfb, 0xc2, 0xe0, 0xf9, 0x8a, 0x6f, 0x20,
+                      0x19, 0x98, 0x78, 0xf3, 0x92, 0x31, 0x17, 0x18});
     CHECK(n.size() == 1);
     SliceHeader sh;
     const bool ok = ParseSliceHeader(n[0].rbsp.data(), n[0].rbsp.size(),
@@ -144,14 +172,20 @@ int main() {
     CHECK(sh.short_term_ref_pic_set_sps_flag == false);  // inline
     CHECK(sh.current_rps.num_negative_pics == 1);
     CHECK(sh.current_rps.num_positive_pics == 0);
+    CHECK(sh.num_pic_total_curr == 1);
     CHECK(sh.slice_temporal_mvp_enabled_flag);
     CHECK(sh.slice_sao_luma_flag);
+    CHECK(sh.slice_qp_delta == 7);
+    CHECK(sh.slice_data_bit_offset_rbsp == 144);
+    CHECK((sh.slice_data_bit_offset_rbsp & 7) == 0);
   }
 
   // B slice (TRAIL_N, type 0): POC 1, inline RPS with a reference on each side.
   {
-    auto n = WrapNal({0x00, 0x01, 0xe0, 0x24, 0xbf, 0x86, 0x14, 0x8c, 0x22,
-                      0xa9, 0x99, 0xa2, 0x15, 0xea, 0xc0, 0x8b});
+    auto n = WrapNal({0x00, 0x01, 0xe0, 0x24, 0xbf, 0x86, 0x14, 0x8c,
+                      0x22, 0xa9, 0x99, 0xa2, 0x15, 0xea, 0xc0, 0x8b,
+                      0x40, 0x01, 0x28, 0x9d, 0x80, 0x94, 0x37, 0xc8,
+                      0x63, 0x7f, 0xe4, 0x65, 0xa3, 0xa4, 0x14, 0x69});
     CHECK(n.size() == 1);
     SliceHeader sh;
     const bool ok = ParseSliceHeader(n[0].rbsp.data(), n[0].rbsp.size(),
@@ -161,7 +195,11 @@ int main() {
     CHECK(sh.slice_pic_order_cnt_lsb == 1);
     CHECK(sh.current_rps.num_negative_pics == 1);
     CHECK(sh.current_rps.num_positive_pics == 1);
+    CHECK(sh.num_pic_total_curr == 2);
     CHECK(sh.slice_temporal_mvp_enabled_flag);
+    CHECK(sh.slice_qp_delta == 10);
+    CHECK(sh.slice_data_bit_offset_rbsp == 104);
+    CHECK((sh.slice_data_bit_offset_rbsp & 7) == 0);
   }
 
   // Truncation and null inputs are rejected, not over-read.
