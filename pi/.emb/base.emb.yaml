@@ -1,0 +1,14 @@
+# Cross-build manifest for the Pi stateless HEVC smoke test. Non-Flutter: one
+# plain CMake executable, no engine/backend needed.
+id: pi-hevc-stateless
+type: app
+supported_archs: [arm64]
+supported_host_types: [fedora, ubuntu]
+cross:
+  provider: arm-gnu
+  package:
+    name: pi-hevc-stateless
+    bin: pi_hevc_stateless
+  backends:
+    default:
+      CMAKE_BUILD_TYPE: Release
