@@ -226,8 +226,11 @@ int VaapiH265Decoder::ComputePoc(const h265::SliceHeader& sh,
   return poc;
 }
 
-bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
-  // Gather the active SPS/PPS state the slice parser needs.
+bool VaapiH265Decoder::DecodePicture(
+    const std::vector<const h265::Nal*>& slices) {
+  if (slices.empty()) return false;
+  // Gather the active SPS/PPS state the slice parser needs (the same for every
+  // slice of the picture).
   h265::SliceContext ctx;
   ctx.pic_size_in_ctbs = sps_.pic_size_in_ctbs;
   ctx.log2_max_pic_order_cnt_lsb = sps_.log2_max_pic_order_cnt_lsb;
@@ -269,13 +272,22 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
   ctx.chroma_qp_offset_list_enabled_flag =
       pps_.range_extension.chroma_qp_offset_list_enabled_flag;
 
-  h265::SliceHeader sh{};
-  if (!h265::ParseSliceHeader(nal.rbsp.data(), nal.rbsp.size(), nal.type, ctx,
-                              &sh)) {
-    V4L2WC_LOG(V4L2WC_WARNING)
-        << "vaapi-h265: malformed slice header; dropping";
-    return false;
+  // Parse every slice header. The first slice drives the picture-level
+  // derivation (POC, reference-picture set, picture parameters); the picture is
+  // intra only if every slice is.
+  std::vector<h265::SliceHeader> headers(slices.size());
+  bool all_intra = true;
+  for (std::size_t i = 0; i < slices.size(); ++i) {
+    if (!h265::ParseSliceHeader(slices[i]->rbsp.data(), slices[i]->rbsp.size(),
+                                slices[i]->type, ctx, &headers[i])) {
+      V4L2WC_LOG(V4L2WC_WARNING)
+          << "vaapi-h265: malformed slice header; dropping";
+      return false;
+    }
+    if (headers[i].slice_type != h265::SliceType::kI) all_intra = false;
   }
+  const h265::Nal& nal = *slices[0];
+  const h265::SliceHeader& sh = headers[0];
 
   // The VA picture buffer holds column_width_minus1[19] /
   // row_height_minus1[21], so more tiles than that cannot be described; drop
@@ -285,23 +297,6 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
     V4L2WC_LOG(V4L2WC_WARNING) << "vaapi-h265: too many tiles; dropping";
     return false;
   }
-
-  // The hardware addresses slice data in the raw NAL. slice_data_byte_offset is
-  // measured in the emulation-removed domain and includes the two-byte NAL
-  // header; the driver re-adds the emulation bytes it is told about.
-  std::uint32_t raw_bit_offset = 0;
-  if (!h265::RbspToRawBitOffset(nal, sh.slice_data_bit_offset_rbsp,
-                                &raw_bit_offset)) {
-    V4L2WC_LOG(V4L2WC_WARNING)
-        << "vaapi-h265: slice data offset outside NAL; dropping";
-    return false;
-  }
-  const std::uint32_t rbsp_byte_offset = sh.slice_data_bit_offset_rbsp / 8;
-  const std::uint32_t slice_data_byte_offset = 2 + rbsp_byte_offset;
-  // Emulation bytes removed between the NAL header and slice_data: the raw
-  // position minus the emulation-removed position (2-byte header + rbsp bytes).
-  const std::uint32_t num_emu_bytes =
-      raw_bit_offset / 8 - slice_data_byte_offset;
 
   const int poc = ComputePoc(sh, nal);
 
@@ -567,10 +562,7 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
       pps_.slice_segment_header_extension_present_flag;
   pp.slice_parsing_fields.bits.RapPicFlag = h265::IsIrap(nal.type) ? 1 : 0;
   pp.slice_parsing_fields.bits.IdrPicFlag = h265::IsIdr(nal.type) ? 1 : 0;
-  // Single-slice pictures (WPP, the packager default): the picture is intra iff
-  // this slice is.
-  pp.slice_parsing_fields.bits.IntraPicFlag =
-      sh.slice_type == h265::SliceType::kI ? 1 : 0;
+  pp.slice_parsing_fields.bits.IntraPicFlag = all_intra ? 1 : 0;
 
   pp.log2_max_pic_order_cnt_lsb_minus4 =
       static_cast<std::uint8_t>(sps_.log2_max_pic_order_cnt_lsb - 4);
@@ -588,136 +580,7 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
       static_cast<std::uint8_t>(pps_.num_extra_slice_header_bits);
   pp.st_rps_bits = sh.short_term_ref_pic_set_bits;
 
-  VASliceParameterBufferHEVC sp{};
-  sp.slice_data_size = static_cast<std::uint32_t>(nal.raw.size());
-  sp.slice_data_offset = 0;
-  sp.slice_data_flag = VA_SLICE_DATA_FLAG_ALL;
-  sp.slice_data_byte_offset = slice_data_byte_offset;
-  sp.slice_segment_address = sh.slice_segment_address;
-  for (auto& list : sp.RefPicList)
-    for (auto& e : list) e = 0xFF;
-
-  // Reference lists (clause 8.3.4). The temporary list cycles through the
-  // current picture's short-term sets until it is at least as long as the
-  // active count. Without reference-list modification RefPicListX[i] is
-  // RefPicListTempX[i]; with it, RefPicListTempX[list_entry_lX[i]]. Each entry
-  // is stored as its index into ReferenceFrames[].
-  const bool is_p = sh.slice_type == h265::SliceType::kP;
-  const bool is_b = sh.slice_type == h265::SliceType::kB;
-  // A reference the DPB no longer holds maps to 0xFF (invalid); it never
-  // aliases the picture that happens to occupy slot 0.
-  auto ref_of = [&](const RpsEntry& e) -> std::uint8_t {
-    return (e.found && e.slot < 64 && ref_index_by_slot[e.slot] >= 0)
-               ? static_cast<std::uint8_t>(ref_index_by_slot[e.slot])
-               : 0xFF;
-  };
-  auto build_list = [](const std::vector<std::uint8_t>& temp, bool modified,
-                       const std::uint32_t* list_entry,
-                       std::uint32_t active_minus1, std::uint8_t* out_list) {
-    if (temp.empty()) return;
-    for (std::uint32_t i = 0; i <= active_minus1 && i < 15; ++i) {
-      std::uint32_t idx = modified ? list_entry[i] : i % temp.size();
-      idx %= temp.size();  // the parser bounds list_entry; clamp defensively
-      out_list[i] = temp[idx];
-    }
-  };
-  if (is_p || is_b) {
-    // L0: StCurrBefore, StCurrAfter, then LtCurr.
-    std::vector<std::uint8_t> temp0;
-    for (const auto& e : st_curr_before) temp0.push_back(ref_of(e));
-    for (const auto& e : st_curr_after) temp0.push_back(ref_of(e));
-    for (const auto& e : lt_curr) temp0.push_back(ref_of(e));
-    build_list(temp0, sh.ref_pic_list_modification_flag_l0, sh.list_entry_l0,
-               sh.num_ref_idx_l0_active_minus1, sp.RefPicList[0]);
-    if (is_b) {
-      // L1: StCurrAfter, StCurrBefore, then LtCurr.
-      std::vector<std::uint8_t> temp1;
-      for (const auto& e : st_curr_after) temp1.push_back(ref_of(e));
-      for (const auto& e : st_curr_before) temp1.push_back(ref_of(e));
-      for (const auto& e : lt_curr) temp1.push_back(ref_of(e));
-      build_list(temp1, sh.ref_pic_list_modification_flag_l1, sh.list_entry_l1,
-                 sh.num_ref_idx_l1_active_minus1, sp.RefPicList[1]);
-    }
-  }
-  sp.LongSliceFlags.fields.LastSliceOfPic = 1;
-  sp.LongSliceFlags.fields.dependent_slice_segment_flag =
-      sh.dependent_slice_segment_flag;
-  sp.LongSliceFlags.fields.slice_type =
-      static_cast<std::uint32_t>(sh.slice_type);
-  sp.LongSliceFlags.fields.color_plane_id = sh.colour_plane_id;
-  sp.LongSliceFlags.fields.slice_sao_luma_flag = sh.slice_sao_luma_flag;
-  sp.LongSliceFlags.fields.slice_sao_chroma_flag = sh.slice_sao_chroma_flag;
-  sp.LongSliceFlags.fields.slice_temporal_mvp_enabled_flag =
-      sh.slice_temporal_mvp_enabled_flag;
-  sp.LongSliceFlags.fields.slice_deblocking_filter_disabled_flag =
-      sh.slice_deblocking_filter_disabled_flag;
-  sp.LongSliceFlags.fields.collocated_from_l0_flag = sh.collocated_from_l0_flag;
-  sp.LongSliceFlags.fields.slice_loop_filter_across_slices_enabled_flag =
-      sh.slice_loop_filter_across_slices_enabled_flag;
-  // collocated_ref_idx indexes the collocated reference list; only meaningful
-  // when temporal MVP is on (0xFF otherwise, e.g. an intra slice).
-  sp.collocated_ref_idx = sh.slice_temporal_mvp_enabled_flag
-                              ? static_cast<std::uint8_t>(sh.collocated_ref_idx)
-                              : 0xFF;
-  sp.num_ref_idx_l0_active_minus1 =
-      static_cast<std::uint8_t>(sh.num_ref_idx_l0_active_minus1);
-  sp.num_ref_idx_l1_active_minus1 =
-      static_cast<std::uint8_t>(sh.num_ref_idx_l1_active_minus1);
-  sp.slice_qp_delta = static_cast<std::int8_t>(sh.slice_qp_delta);
-  sp.slice_cb_qp_offset = static_cast<std::int8_t>(sh.slice_cb_qp_offset);
-  sp.slice_cr_qp_offset = static_cast<std::int8_t>(sh.slice_cr_qp_offset);
-  sp.slice_beta_offset_div2 =
-      static_cast<std::int8_t>(sh.slice_beta_offset_div2);
-  sp.slice_tc_offset_div2 = static_cast<std::int8_t>(sh.slice_tc_offset_div2);
-  sp.five_minus_max_num_merge_cand =
-      static_cast<std::uint8_t>(sh.five_minus_max_num_merge_cand);
-  sp.num_entry_point_offsets =
-      static_cast<std::uint16_t>(sh.num_entry_point_offsets);
-  sp.slice_data_num_emu_prevn_bytes = static_cast<std::uint16_t>(num_emu_bytes);
-
-  // Weighted prediction (clause 7.4.7.3). VA takes the luma weight/offset
-  // deltas as-is and the derived chroma offsets. An unflagged reference keeps
-  // the default weight (delta 0) and zero offset. The common HLS stream signals
-  // the table with default weights, so this is usually all zeros.
-  if (is_p || is_b) {
-    const auto& w = sh.pred_weight;
-    sp.luma_log2_weight_denom =
-        static_cast<std::uint8_t>(w.luma_log2_weight_denom);
-    sp.delta_chroma_log2_weight_denom =
-        static_cast<std::int8_t>(w.delta_chroma_log2_weight_denom);
-    const int chroma_denom = static_cast<int>(w.luma_log2_weight_denom) +
-                             w.delta_chroma_log2_weight_denom;
-    constexpr int kWpOffsetHalfRangeC =
-        128;  // 8-bit, no high-precision offsets
-    auto fill = [&](int list, std::uint32_t active_minus1,
-                    std::int8_t (&dlw)[15], std::int8_t (&lo)[15],
-                    std::int8_t (&dcw)[15][2], std::int8_t (&co)[15][2]) {
-      for (std::uint32_t i = 0; i <= active_minus1 && i < 15; ++i) {
-        if (w.luma_weight_flag[list][i]) {
-          dlw[i] = static_cast<std::int8_t>(w.delta_luma_weight[list][i]);
-          lo[i] = static_cast<std::int8_t>(w.luma_offset[list][i]);
-        }
-        if (w.chroma_weight_flag[list][i]) {
-          for (int j = 0; j < 2; ++j) {
-            const int cweight =
-                (1 << chroma_denom) + w.delta_chroma_weight[list][i][j];
-            dcw[i][j] =
-                static_cast<std::int8_t>(w.delta_chroma_weight[list][i][j]);
-            int off = kWpOffsetHalfRangeC + w.delta_chroma_offset[list][i][j] -
-                      ((kWpOffsetHalfRangeC * cweight) >> chroma_denom);
-            if (off < -kWpOffsetHalfRangeC) off = -kWpOffsetHalfRangeC;
-            if (off > kWpOffsetHalfRangeC - 1) off = kWpOffsetHalfRangeC - 1;
-            co[i][j] = static_cast<std::int8_t>(off);
-          }
-        }
-      }
-    };
-    fill(0, sh.num_ref_idx_l0_active_minus1, sp.delta_luma_weight_l0,
-         sp.luma_offset_l0, sp.delta_chroma_weight_l0, sp.ChromaOffsetL0);
-    if (is_b)
-      fill(1, sh.num_ref_idx_l1_active_minus1, sp.delta_luma_weight_l1,
-           sp.luma_offset_l1, sp.delta_chroma_weight_l1, sp.ChromaOffsetL1);
-  }
+  // ---- Picture-level buffers (built once, from the first slice). ----
 
   // When scaling lists are enabled, the inverse-quantisation matrix is the
   // active list (the PPS override if present, else the SPS list, which the
@@ -739,12 +602,9 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
                 sizeof(iq.ScalingListDC32x32));
   }
 
-  // Range-extension profiles (4:2:2 / 4:4:4) take the Extension picture and
-  // slice buffers: the base struct plus a range-extension struct. The base is
-  // the pp / sp already built; the range-extension fields come from the parsed
-  // SPS/PPS/slice range extensions.
+  // Range-extension picture parameters (4:2:2 / 4:4:4): the base struct plus a
+  // range-extension struct from the parsed SPS/PPS range extensions.
   VAPictureParameterBufferHEVCExtension pp_ext{};
-  VASliceParameterBufferHEVCExtension sp_ext{};
   if (is_rext_) {
     pp_ext.base = pp;
     auto& rf = pp_ext.rext.range_extension_pic_fields.bits;
@@ -785,63 +645,229 @@ bool VaapiH265Decoder::DecodeSlice(const h265::Nal& nal) {
       pp_ext.rext.cr_qp_offset_list[i] =
           static_cast<std::int8_t>(px.cr_qp_offset_list[i]);
     }
-
-    sp_ext.base = sp;
-    sp_ext.rext.slice_ext_flags.bits.cu_chroma_qp_offset_enabled_flag =
-        sh.cu_chroma_qp_offset_enabled_flag;
-    // The wider (int16) weighted-prediction offsets mirror the base int8 ones;
-    // they carry the full range when high_precision_offsets is set.
-    for (int i = 0; i < 15; ++i) {
-      sp_ext.rext.luma_offset_l0[i] = sp.luma_offset_l0[i];
-      sp_ext.rext.luma_offset_l1[i] = sp.luma_offset_l1[i];
-      for (int j = 0; j < 2; ++j) {
-        sp_ext.rext.ChromaOffsetL0[i][j] = sp.ChromaOffsetL0[i][j];
-        sp_ext.rext.ChromaOffsetL1[i][j] = sp.ChromaOffsetL1[i][j];
-      }
-    }
   }
 
-  VABufferID b_pp = 0, b_sp = 0, b_sd = 0, b_iq = 0;
   auto ck = [&](VAStatus s, const char* what) {
     if (s != VA_STATUS_SUCCESS)
       V4L2WC_LOG(V4L2WC_ERROR)
           << "vaapi-h265: " << what << ": " << va_.ErrorStr(s);
     return s == VA_STATUS_SUCCESS;
   };
+  VABufferID b_pp = 0, b_iq = 0;
   if (!ck(va_.CreateBuffer(
               dpy_, context_, VAPictureParameterBufferType,
               is_rext_ ? sizeof(pp_ext) : sizeof(pp), 1,
               is_rext_ ? static_cast<void*>(&pp_ext) : static_cast<void*>(&pp),
               &b_pp),
-          "pic buf") ||
-      !ck(va_.CreateBuffer(
-              dpy_, context_, VASliceParameterBufferType,
-              is_rext_ ? sizeof(sp_ext) : sizeof(sp), 1,
-              is_rext_ ? static_cast<void*>(&sp_ext) : static_cast<void*>(&sp),
-              &b_sp),
-          "slice buf") ||
-      !ck(va_.CreateBuffer(dpy_, context_, VASliceDataBufferType,
-                           static_cast<unsigned>(nal.raw.size()), 1,
-                           const_cast<std::uint8_t*>(nal.raw.data()), &b_sd),
-          "data buf"))
+          "pic buf"))
     return false;
   if (have_iq && !ck(va_.CreateBuffer(dpy_, context_, VAIQMatrixBufferType,
                                       sizeof(iq), 1, &iq, &b_iq),
-                     "iq buf"))
+                     "iq buf")) {
+    va_.DestroyBuffer(dpy_, b_pp);
     return false;
+  }
   bool ok = ck(va_.BeginPicture(dpy_, context_, surf), "BeginPicture");
   // Header buffers: the picture parameters, and the IQ matrix when present.
   VABufferID hdr[2] = {b_pp, b_iq};
   ok = ok && ck(va_.RenderPicture(dpy_, context_, hdr, have_iq ? 2 : 1),
                 "RenderPicture hdr");
-  VABufferID sl[2] = {b_sp, b_sd};
-  ok =
-      ok && ck(va_.RenderPicture(dpy_, context_, sl, 2), "RenderPicture slice");
+
+  // ---- Render each slice into the open picture. ----
+  for (std::size_t si = 0; ok && si < slices.size(); ++si) {
+    const h265::Nal& snal = *slices[si];
+    const h265::SliceHeader& ssh = headers[si];
+
+    // The hardware addresses slice data in the raw NAL. slice_data_byte_offset
+    // is in the emulation-removed domain and includes the two-byte NAL header;
+    // the driver re-adds the emulation bytes it is told about.
+    std::uint32_t raw_bit_offset = 0;
+    if (!h265::RbspToRawBitOffset(snal, ssh.slice_data_bit_offset_rbsp,
+                                  &raw_bit_offset)) {
+      V4L2WC_LOG(V4L2WC_WARNING)
+          << "vaapi-h265: slice data offset outside NAL; dropping";
+      ok = false;
+      break;
+    }
+    const std::uint32_t slice_data_byte_offset =
+        2 + ssh.slice_data_bit_offset_rbsp / 8;
+    const std::uint32_t num_emu_bytes =
+        raw_bit_offset / 8 - slice_data_byte_offset;
+
+    VASliceParameterBufferHEVC sp{};
+    sp.slice_data_size = static_cast<std::uint32_t>(snal.raw.size());
+    sp.slice_data_offset = 0;
+    sp.slice_data_flag = VA_SLICE_DATA_FLAG_ALL;
+    sp.slice_data_byte_offset = slice_data_byte_offset;
+    sp.slice_segment_address = ssh.slice_segment_address;
+    for (auto& list : sp.RefPicList)
+      for (auto& e : list) e = 0xFF;
+
+    // Reference lists (clause 8.3.4), built per slice from the picture's
+    // short-term sets. Without reference-list modification RefPicListX[i] is
+    // RefPicListTempX[i]; with it, RefPicListTempX[list_entry_lX[i]]. Each
+    // entry is an index into ReferenceFrames[].
+    const bool is_p = ssh.slice_type == h265::SliceType::kP;
+    const bool is_b = ssh.slice_type == h265::SliceType::kB;
+    auto ref_of = [&](const RpsEntry& e) -> std::uint8_t {
+      return (e.found && e.slot < 64 && ref_index_by_slot[e.slot] >= 0)
+                 ? static_cast<std::uint8_t>(ref_index_by_slot[e.slot])
+                 : 0xFF;
+    };
+    auto build_list = [](const std::vector<std::uint8_t>& temp, bool modified,
+                         const std::uint32_t* list_entry,
+                         std::uint32_t active_minus1, std::uint8_t* out_list) {
+      if (temp.empty()) return;
+      for (std::uint32_t i = 0; i <= active_minus1 && i < 15; ++i) {
+        std::uint32_t idx = modified ? list_entry[i] : i % temp.size();
+        idx %= temp.size();  // the parser bounds list_entry; clamp defensively
+        out_list[i] = temp[idx];
+      }
+    };
+    if (is_p || is_b) {
+      std::vector<std::uint8_t> temp0;
+      for (const auto& e : st_curr_before) temp0.push_back(ref_of(e));
+      for (const auto& e : st_curr_after) temp0.push_back(ref_of(e));
+      for (const auto& e : lt_curr) temp0.push_back(ref_of(e));
+      build_list(temp0, ssh.ref_pic_list_modification_flag_l0,
+                 ssh.list_entry_l0, ssh.num_ref_idx_l0_active_minus1,
+                 sp.RefPicList[0]);
+      if (is_b) {
+        std::vector<std::uint8_t> temp1;
+        for (const auto& e : st_curr_after) temp1.push_back(ref_of(e));
+        for (const auto& e : st_curr_before) temp1.push_back(ref_of(e));
+        for (const auto& e : lt_curr) temp1.push_back(ref_of(e));
+        build_list(temp1, ssh.ref_pic_list_modification_flag_l1,
+                   ssh.list_entry_l1, ssh.num_ref_idx_l1_active_minus1,
+                   sp.RefPicList[1]);
+      }
+    }
+    // The last slice of the picture carries LastSliceOfPic.
+    sp.LongSliceFlags.fields.LastSliceOfPic = (si + 1 == slices.size()) ? 1 : 0;
+    sp.LongSliceFlags.fields.dependent_slice_segment_flag =
+        ssh.dependent_slice_segment_flag;
+    sp.LongSliceFlags.fields.slice_type =
+        static_cast<std::uint32_t>(ssh.slice_type);
+    sp.LongSliceFlags.fields.color_plane_id = ssh.colour_plane_id;
+    sp.LongSliceFlags.fields.slice_sao_luma_flag = ssh.slice_sao_luma_flag;
+    sp.LongSliceFlags.fields.slice_sao_chroma_flag = ssh.slice_sao_chroma_flag;
+    sp.LongSliceFlags.fields.slice_temporal_mvp_enabled_flag =
+        ssh.slice_temporal_mvp_enabled_flag;
+    sp.LongSliceFlags.fields.slice_deblocking_filter_disabled_flag =
+        ssh.slice_deblocking_filter_disabled_flag;
+    sp.LongSliceFlags.fields.collocated_from_l0_flag =
+        ssh.collocated_from_l0_flag;
+    sp.LongSliceFlags.fields.slice_loop_filter_across_slices_enabled_flag =
+        ssh.slice_loop_filter_across_slices_enabled_flag;
+    // collocated_ref_idx indexes the collocated reference list; only meaningful
+    // when temporal MVP is on (0xFF otherwise, e.g. an intra slice).
+    sp.collocated_ref_idx =
+        ssh.slice_temporal_mvp_enabled_flag
+            ? static_cast<std::uint8_t>(ssh.collocated_ref_idx)
+            : 0xFF;
+    sp.num_ref_idx_l0_active_minus1 =
+        static_cast<std::uint8_t>(ssh.num_ref_idx_l0_active_minus1);
+    sp.num_ref_idx_l1_active_minus1 =
+        static_cast<std::uint8_t>(ssh.num_ref_idx_l1_active_minus1);
+    sp.slice_qp_delta = static_cast<std::int8_t>(ssh.slice_qp_delta);
+    sp.slice_cb_qp_offset = static_cast<std::int8_t>(ssh.slice_cb_qp_offset);
+    sp.slice_cr_qp_offset = static_cast<std::int8_t>(ssh.slice_cr_qp_offset);
+    sp.slice_beta_offset_div2 =
+        static_cast<std::int8_t>(ssh.slice_beta_offset_div2);
+    sp.slice_tc_offset_div2 =
+        static_cast<std::int8_t>(ssh.slice_tc_offset_div2);
+    sp.five_minus_max_num_merge_cand =
+        static_cast<std::uint8_t>(ssh.five_minus_max_num_merge_cand);
+    sp.num_entry_point_offsets =
+        static_cast<std::uint16_t>(ssh.num_entry_point_offsets);
+    sp.slice_data_num_emu_prevn_bytes =
+        static_cast<std::uint16_t>(num_emu_bytes);
+
+    // Weighted prediction (clause 7.4.7.3). VA takes the luma weight/offset
+    // deltas as-is and the derived chroma offsets. An unflagged reference keeps
+    // the default weight (delta 0) and zero offset.
+    if (is_p || is_b) {
+      const auto& w = ssh.pred_weight;
+      sp.luma_log2_weight_denom =
+          static_cast<std::uint8_t>(w.luma_log2_weight_denom);
+      sp.delta_chroma_log2_weight_denom =
+          static_cast<std::int8_t>(w.delta_chroma_log2_weight_denom);
+      const int chroma_denom = static_cast<int>(w.luma_log2_weight_denom) +
+                               w.delta_chroma_log2_weight_denom;
+      constexpr int kWpOffsetHalfRangeC = 128;  // 8-bit, no high precision
+      auto fill = [&](int list, std::uint32_t active_minus1,
+                      std::int8_t (&dlw)[15], std::int8_t (&lo)[15],
+                      std::int8_t (&dcw)[15][2], std::int8_t (&co)[15][2]) {
+        for (std::uint32_t i = 0; i <= active_minus1 && i < 15; ++i) {
+          if (w.luma_weight_flag[list][i]) {
+            dlw[i] = static_cast<std::int8_t>(w.delta_luma_weight[list][i]);
+            lo[i] = static_cast<std::int8_t>(w.luma_offset[list][i]);
+          }
+          if (w.chroma_weight_flag[list][i]) {
+            for (int j = 0; j < 2; ++j) {
+              const int cweight =
+                  (1 << chroma_denom) + w.delta_chroma_weight[list][i][j];
+              dcw[i][j] =
+                  static_cast<std::int8_t>(w.delta_chroma_weight[list][i][j]);
+              int off = kWpOffsetHalfRangeC +
+                        w.delta_chroma_offset[list][i][j] -
+                        ((kWpOffsetHalfRangeC * cweight) >> chroma_denom);
+              if (off < -kWpOffsetHalfRangeC) off = -kWpOffsetHalfRangeC;
+              if (off > kWpOffsetHalfRangeC - 1) off = kWpOffsetHalfRangeC - 1;
+              co[i][j] = static_cast<std::int8_t>(off);
+            }
+          }
+        }
+      };
+      fill(0, ssh.num_ref_idx_l0_active_minus1, sp.delta_luma_weight_l0,
+           sp.luma_offset_l0, sp.delta_chroma_weight_l0, sp.ChromaOffsetL0);
+      if (is_b)
+        fill(1, ssh.num_ref_idx_l1_active_minus1, sp.delta_luma_weight_l1,
+             sp.luma_offset_l1, sp.delta_chroma_weight_l1, sp.ChromaOffsetL1);
+    }
+
+    // Range-extension slice parameters.
+    VASliceParameterBufferHEVCExtension sp_ext{};
+    if (is_rext_) {
+      sp_ext.base = sp;
+      sp_ext.rext.slice_ext_flags.bits.cu_chroma_qp_offset_enabled_flag =
+          ssh.cu_chroma_qp_offset_enabled_flag;
+      // The wider (int16) offsets mirror the base int8 ones; they carry the
+      // full range when high_precision_offsets is set.
+      for (int i = 0; i < 15; ++i) {
+        sp_ext.rext.luma_offset_l0[i] = sp.luma_offset_l0[i];
+        sp_ext.rext.luma_offset_l1[i] = sp.luma_offset_l1[i];
+        for (int j = 0; j < 2; ++j) {
+          sp_ext.rext.ChromaOffsetL0[i][j] = sp.ChromaOffsetL0[i][j];
+          sp_ext.rext.ChromaOffsetL1[i][j] = sp.ChromaOffsetL1[i][j];
+        }
+      }
+    }
+
+    VABufferID b_sp = 0, b_sd = 0;
+    if (!ck(va_.CreateBuffer(dpy_, context_, VASliceParameterBufferType,
+                             is_rext_ ? sizeof(sp_ext) : sizeof(sp), 1,
+                             is_rext_ ? static_cast<void*>(&sp_ext)
+                                      : static_cast<void*>(&sp),
+                             &b_sp),
+            "slice buf") ||
+        !ck(va_.CreateBuffer(dpy_, context_, VASliceDataBufferType,
+                             static_cast<unsigned>(snal.raw.size()), 1,
+                             const_cast<std::uint8_t*>(snal.raw.data()), &b_sd),
+            "data buf")) {
+      ok = false;
+    } else {
+      VABufferID slbuf[2] = {b_sp, b_sd};
+      ok = ok && ck(va_.RenderPicture(dpy_, context_, slbuf, 2),
+                    "RenderPicture slice");
+    }
+    if (b_sp) va_.DestroyBuffer(dpy_, b_sp);
+    if (b_sd) va_.DestroyBuffer(dpy_, b_sd);
+  }
+
   ok = ok && ck(va_.EndPicture(dpy_, context_), "EndPicture");
   ok = ok && ck(va_.SyncSurface(dpy_, surf), "SyncSurface");
   va_.DestroyBuffer(dpy_, b_pp);
-  va_.DestroyBuffer(dpy_, b_sp);
-  va_.DestroyBuffer(dpy_, b_sd);
   if (have_iq) va_.DestroyBuffer(dpy_, b_iq);
   if (!ok) return false;
 
@@ -876,6 +902,7 @@ SubmitResult VaapiH265Decoder::SubmitBitstream(const std::uint8_t* data,
                                                std::size_t size,
                                                std::uint64_t timestamp) {
   auto nals = h265::ParseAnnexB(data, size);
+  std::vector<const h265::Nal*> vcl;
   for (auto& n : nals) {
     if (n.type == h265::NalUnitType::kSpsNut) {
       h265::Sps s{};
@@ -900,10 +927,29 @@ SubmitResult VaapiH265Decoder::SubmitBitstream(const std::uint8_t* data,
         have_pps_ = true;
       }
     } else if (h265::IsVcl(n.type) && have_sps_ && have_pps_) {
-      if (!EnsureConfigured(sps_)) return SubmitResult::kError;
-      if (DecodeSlice(n) && have_ready_)
-        slots_[ready_slot_].timestamp = timestamp;
+      vcl.push_back(&n);
     }
+  }
+
+  if (!vcl.empty()) {
+    if (!EnsureConfigured(sps_)) return SubmitResult::kError;
+    // Group the VCL NALs into pictures. A new picture starts at a slice with
+    // first_slice_segment_in_pic_flag set -- the first bit of the slice header
+    // RBSP -- so a buffer carrying more than one picture is split correctly,
+    // and a multi-slice picture is decoded in one BeginPicture / EndPicture.
+    std::vector<const h265::Nal*> picture;
+    auto flush = [&]() {
+      if (picture.empty()) return;
+      if (DecodePicture(picture) && have_ready_)
+        slots_[ready_slot_].timestamp = timestamp;
+      picture.clear();
+    };
+    for (const h265::Nal* n : vcl) {
+      const bool first_slice = !n->rbsp.empty() && (n->rbsp[0] & 0x80) != 0;
+      if (first_slice) flush();
+      picture.push_back(n);
+    }
+    flush();
   }
   return SubmitResult::kOk;
 }

@@ -73,7 +73,9 @@ class VaapiH265Decoder : public IDmaDecoder {
  private:
   VaapiH265Decoder();
   bool EnsureConfigured(const h265::Sps& sps);
-  bool DecodeSlice(const h265::Nal& nal);
+  // Decodes one coded picture: its VCL NALs in order (the first has
+  // first_slice_segment_in_pic_flag set). A picture may carry multiple slices.
+  bool DecodePicture(const std::vector<const h265::Nal*>& slices);
   int ComputePoc(const h265::SliceHeader& sh, const h265::Nal& nal);
   int PickFreeSlot();
   void ExportSlot(std::uint32_t slot, std::uint64_t timestamp);

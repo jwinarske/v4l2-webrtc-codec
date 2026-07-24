@@ -47,8 +47,9 @@ std::vector<std::uint8_t> ReadFile(const char* path) {
 }
 
 // Splits an Annex-B stream into access units (raw bytes including start codes):
-// a new access unit begins at a VCL NAL once the current one already holds one.
-// This assumes single-slice pictures, which is what a WPP HLS packager emits.
+// a new access unit begins at a VCL NAL that starts a picture
+// (first_slice_segment_in_pic_flag set), so a multi-slice picture is delivered
+// whole in one SubmitBitstream.
 std::vector<std::vector<std::uint8_t>> SplitAccessUnits(
     const std::vector<std::uint8_t>& data) {
   std::vector<std::size_t> starts;
@@ -63,7 +64,12 @@ std::vector<std::vector<std::uint8_t>> SplitAccessUnits(
     const std::size_t e = (k + 1 < starts.size()) ? starts[k + 1] : data.size();
     const std::uint32_t type = (data[s + 3] >> 1) & 0x3f;
     const bool is_vcl = type <= 31;
-    if (is_vcl && cur_has_vcl) {
+    // A picture starts at a VCL NAL with first_slice_segment_in_pic_flag (the
+    // first RBSP bit, past the two-byte NAL header) set; later slices of the
+    // same picture stay in the current access unit.
+    const bool first_slice =
+        is_vcl && s + 5 < data.size() && (data[s + 5] & 0x80);
+    if (first_slice && cur_has_vcl) {
       aus.push_back(cur);
       cur.clear();
       cur_has_vcl = false;

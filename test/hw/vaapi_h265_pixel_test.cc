@@ -64,7 +64,11 @@ std::vector<std::vector<std::uint8_t>> SplitAccessUnits(
   for (std::size_t k = 0; k < st.size(); ++k) {
     std::size_t s = st[k], e = (k + 1 < st.size()) ? st[k + 1] : d.size();
     bool is_vcl = ((d[s + 3] >> 1) & 0x3f) <= 31;
-    if (is_vcl && vcl) {
+    // A picture starts at a VCL NAL with first_slice_segment_in_pic_flag (the
+    // first RBSP bit, just past the two-byte NAL header) set. Later slices of
+    // the same picture stay in the current access unit.
+    bool first_slice = is_vcl && s + 5 < d.size() && (d[s + 5] & 0x80);
+    if (first_slice && vcl) {
       aus.push_back(cur);
       cur.clear();
       vcl = false;
