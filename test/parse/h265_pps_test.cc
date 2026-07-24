@@ -116,6 +116,24 @@ static std::vector<uint8_t> BuildSyntheticPps() {
   w.WriteFlag(true);   // lists_modification_present_flag
   w.WriteUe(1);        // log2_parallel_merge_level_minus2
   w.WriteFlag(true);   // slice_segment_header_extension_present_flag
+  w.WriteFlag(true);   // pps_extension_present_flag
+  w.WriteFlag(true);   // pps_range_extension_flag
+  w.WriteFlag(false);  // pps_multilayer_extension_flag
+  w.WriteFlag(false);  // pps_3d_extension_flag
+  w.WriteFlag(false);  // pps_scc_extension_flag
+  w.WriteBits(0, 4);   // pps_extension_4bits
+  // pps_range_extension (transform_skip_enabled_flag is true above):
+  w.WriteUe(2);        // log2_max_transform_skip_block_size_minus2 -> size 4
+  w.WriteFlag(false);  // cross_component_prediction_enabled_flag
+  w.WriteFlag(true);   // chroma_qp_offset_list_enabled_flag
+  w.WriteUe(1);        // diff_cu_chroma_qp_offset_depth
+  w.WriteUe(1);        // chroma_qp_offset_list_len_minus1 (two entries)
+  w.WriteSe(-2);       // cb_qp_offset_list[0]
+  w.WriteSe(3);        // cr_qp_offset_list[0]
+  w.WriteSe(1);        // cb_qp_offset_list[1]
+  w.WriteSe(-1);       // cr_qp_offset_list[1]
+  w.WriteUe(0);        // log2_sao_offset_scale_luma
+  w.WriteUe(0);        // log2_sao_offset_scale_chroma
   return w.bytes();
 }
 
@@ -211,6 +229,18 @@ int main() {
       CHECK(pps.lists_modification_present_flag == true);
       CHECK(pps.log2_parallel_merge_level_minus2 == 1);
       CHECK(pps.slice_segment_header_extension_present_flag == true);
+      // Range extension, reached only if the extension flags are parsed right.
+      CHECK(pps.pps_range_extension_flag == true);
+      CHECK(pps.range_extension.log2_max_transform_skip_block_size == 4);
+      CHECK(pps.range_extension.cross_component_prediction_enabled_flag ==
+            false);
+      CHECK(pps.range_extension.chroma_qp_offset_list_enabled_flag == true);
+      CHECK(pps.range_extension.diff_cu_chroma_qp_offset_depth == 1);
+      CHECK(pps.range_extension.chroma_qp_offset_list_len_minus1 == 1);
+      CHECK(pps.range_extension.cb_qp_offset_list[0] == -2);
+      CHECK(pps.range_extension.cr_qp_offset_list[0] == 3);
+      CHECK(pps.range_extension.cb_qp_offset_list[1] == 1);
+      CHECK(pps.range_extension.cr_qp_offset_list[1] == -1);
     }
   }
 

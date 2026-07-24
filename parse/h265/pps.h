@@ -30,6 +30,20 @@ inline constexpr uint32_t kMaxTiles = 1024;
 // Spec maximum for num_ref_idx_lX_default_active_minus1 (clause 7.4.3.3.1).
 inline constexpr uint32_t kMaxRefIdxDefault = 14;
 
+// pps_range_extension (clause 7.3.2.3.2): the picture-level range-extension
+// tools. All default when the PPS carries no range extension.
+struct PpsRangeExtension {
+  uint32_t log2_max_transform_skip_block_size = 2;  // minus2 + 2
+  bool cross_component_prediction_enabled_flag = false;
+  bool chroma_qp_offset_list_enabled_flag = false;
+  uint32_t diff_cu_chroma_qp_offset_depth = 0;
+  uint32_t chroma_qp_offset_list_len_minus1 = 0;
+  int32_t cb_qp_offset_list[6] = {};
+  int32_t cr_qp_offset_list[6] = {};
+  uint32_t log2_sao_offset_scale_luma = 0;
+  uint32_t log2_sao_offset_scale_chroma = 0;
+};
+
 struct Pps {
   Pps();
 
@@ -83,6 +97,10 @@ struct Pps {
   bool lists_modification_present_flag = false;
   uint32_t log2_parallel_merge_level_minus2 = 0;
   bool slice_segment_header_extension_present_flag = false;
+
+  // Range extension (present only for the range-extension profiles).
+  bool pps_range_extension_flag = false;
+  PpsRangeExtension range_extension;
 };
 
 // Parses a PPS from its RBSP (NAL header stripped, emulation-prevention bytes

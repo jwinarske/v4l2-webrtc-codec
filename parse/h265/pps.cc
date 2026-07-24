@@ -114,8 +114,56 @@ bool ParsePps(const uint8_t* rbsp, size_t size, Pps* out) {
     return false;
   }
 
-  // Everything past here (pps_extension flags, VUI-independent extensions) is
-  // not needed by the decoder or the slice-segment header, so the parse stops.
+  bool pps_extension_present = false;
+  if (!br.ReadFlag(&pps_extension_present)) {
+    return false;
+  }
+  if (pps_extension_present) {
+    bool pps_multilayer_extension = false;
+    bool pps_3d_extension = false;
+    bool pps_scc_extension = false;
+    uint32_t pps_extension_4bits = 0;
+    if (!br.ReadFlag(&pps.pps_range_extension_flag) ||
+        !br.ReadFlag(&pps_multilayer_extension) ||
+        !br.ReadFlag(&pps_3d_extension) || !br.ReadFlag(&pps_scc_extension) ||
+        !br.ReadBits(4, &pps_extension_4bits)) {
+      return false;
+    }
+    if (pps.pps_range_extension_flag) {
+      PpsRangeExtension& rx = pps.range_extension;
+      if (pps.transform_skip_enabled_flag) {
+        uint32_t log2_max_ts_minus2 = 0;
+        if (!br.ReadUe(&log2_max_ts_minus2) || log2_max_ts_minus2 > 3) {
+          return false;  // block size 4..32 (CTB-bounded)
+        }
+        rx.log2_max_transform_skip_block_size = log2_max_ts_minus2 + 2;
+      }
+      if (!br.ReadFlag(&rx.cross_component_prediction_enabled_flag) ||
+          !br.ReadFlag(&rx.chroma_qp_offset_list_enabled_flag)) {
+        return false;
+      }
+      if (rx.chroma_qp_offset_list_enabled_flag) {
+        if (!br.ReadUe(&rx.diff_cu_chroma_qp_offset_depth) ||
+            !br.ReadUe(&rx.chroma_qp_offset_list_len_minus1) ||
+            rx.chroma_qp_offset_list_len_minus1 > 5) {  // list holds 6 entries
+          return false;
+        }
+        for (uint32_t i = 0; i <= rx.chroma_qp_offset_list_len_minus1; ++i) {
+          if (!br.ReadSe(&rx.cb_qp_offset_list[i]) ||
+              !br.ReadSe(&rx.cr_qp_offset_list[i])) {
+            return false;
+          }
+        }
+      }
+      if (!br.ReadUe(&rx.log2_sao_offset_scale_luma) ||
+          !br.ReadUe(&rx.log2_sao_offset_scale_chroma) ||
+          rx.log2_sao_offset_scale_luma > 6 ||
+          rx.log2_sao_offset_scale_chroma > 6) {
+        return false;
+      }
+    }
+    // The multilayer / 3D / SCC / reserved extensions are not parsed.
+  }
 
   *out = pps;
   return true;
