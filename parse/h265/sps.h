@@ -51,6 +51,21 @@ struct ShortTermRps {
   bool used_s1[kMaxRefPics] = {};
 };
 
+// sps_range_extension (clause 7.3.2.2.2): coding-tool flags for the 4:2:2 /
+// 4:4:4 and higher-bit-depth range-extension profiles. All false when the SPS
+// carries no range extension.
+struct SpsRangeExtension {
+  bool transform_skip_rotation_enabled_flag = false;
+  bool transform_skip_context_enabled_flag = false;
+  bool implicit_rdpcm_enabled_flag = false;
+  bool explicit_rdpcm_enabled_flag = false;
+  bool extended_precision_processing_flag = false;
+  bool intra_smoothing_disabled_flag = false;
+  bool high_precision_offsets_enabled_flag = false;
+  bool persistent_rice_adaptation_enabled_flag = false;
+  bool cabac_bypass_alignment_enabled_flag = false;
+};
+
 struct Sps {
   Sps();
 
@@ -106,6 +121,10 @@ struct Sps {
   std::vector<uint32_t> lt_ref_pic_poc_lsb_sps;
   bool sps_temporal_mvp_enabled_flag = false;
   bool strong_intra_smoothing_enabled_flag = false;
+
+  // Range extension (present only for the range-extension profiles).
+  bool sps_range_extension_flag = false;
+  SpsRangeExtension range_extension;
 
   // The SPS-defined short-term RPSs, indexed 0..size()-1. Size equals
   // num_short_term_ref_pic_sets.

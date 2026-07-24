@@ -149,7 +149,23 @@ static std::vector<uint8_t> BuildSyntheticSps() {
   w.WriteFlag(false);  // long_term_ref_pics_present_flag
   w.WriteFlag(true);   // sps_temporal_mvp_enabled_flag
   w.WriteFlag(true);   // strong_intra_smoothing_enabled_flag
-  // Parser stops here; a stop bit is not required.
+  w.WriteFlag(false);  // vui_parameters_present_flag (no VUI)
+  w.WriteFlag(true);   // sps_extension_present_flag
+  w.WriteFlag(true);   // sps_range_extension_flag
+  w.WriteFlag(false);  // sps_multilayer_extension_flag
+  w.WriteFlag(false);  // sps_3d_extension_flag
+  w.WriteFlag(false);  // sps_scc_extension_flag
+  w.WriteBits(0, 4);   // sps_extension_4bits
+  // sps_range_extension: nine flags, a recognisable pattern.
+  w.WriteFlag(true);   // transform_skip_rotation_enabled_flag
+  w.WriteFlag(false);  // transform_skip_context_enabled_flag
+  w.WriteFlag(true);   // implicit_rdpcm_enabled_flag
+  w.WriteFlag(false);  // explicit_rdpcm_enabled_flag
+  w.WriteFlag(false);  // extended_precision_processing_flag
+  w.WriteFlag(true);   // intra_smoothing_disabled_flag
+  w.WriteFlag(true);   // high_precision_offsets_enabled_flag
+  w.WriteFlag(false);  // persistent_rice_adaptation_enabled_flag
+  w.WriteFlag(false);  // cabac_bypass_alignment_enabled_flag
   return w.bytes();
 }
 
@@ -276,6 +292,19 @@ int main() {
       CHECK(sps.long_term_ref_pics_present_flag == false);
       CHECK(sps.sps_temporal_mvp_enabled_flag == true);
       CHECK(sps.strong_intra_smoothing_enabled_flag == true);
+      // The range extension is reached only if the VUI (absent here) and the
+      // extension flags are parsed correctly.
+      CHECK(sps.sps_range_extension_flag == true);
+      CHECK(sps.range_extension.transform_skip_rotation_enabled_flag == true);
+      CHECK(sps.range_extension.transform_skip_context_enabled_flag == false);
+      CHECK(sps.range_extension.implicit_rdpcm_enabled_flag == true);
+      CHECK(sps.range_extension.explicit_rdpcm_enabled_flag == false);
+      CHECK(sps.range_extension.extended_precision_processing_flag == false);
+      CHECK(sps.range_extension.intra_smoothing_disabled_flag == true);
+      CHECK(sps.range_extension.high_precision_offsets_enabled_flag == true);
+      CHECK(sps.range_extension.persistent_rice_adaptation_enabled_flag ==
+            false);
+      CHECK(sps.range_extension.cabac_bypass_alignment_enabled_flag == false);
 
       CHECK(sps.short_term_rps.size() == 3);
       if (sps.short_term_rps.size() == 3) {

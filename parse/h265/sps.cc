@@ -68,6 +68,197 @@ bool ParseProfileTierLevel(BitReader* br, uint32_t max_sub_layers_minus1,
   return true;
 }
 
+// hrd_parameters (clause E.2.2). Consumed and discarded; the VUI only needs to
+// be advanced past to reach the SPS extension. commonInfPresentFlag is 1 here.
+bool SkipHrdParameters(BitReader* br, uint32_t max_sub_layers_minus1) {
+  bool nal_hrd = false;
+  bool vcl_hrd = false;
+  bool sub_pic_hrd = false;
+  if (!br->ReadFlag(&nal_hrd) || !br->ReadFlag(&vcl_hrd)) {
+    return false;
+  }
+  if (nal_hrd || vcl_hrd) {
+    if (!br->ReadFlag(&sub_pic_hrd)) {
+      return false;
+    }
+    if (sub_pic_hrd && !br->SkipBits(19)) {  // tick_divisor + 3 length fields
+      return false;
+    }
+    if (!br->SkipBits(8)) {  // bit_rate_scale + cpb_size_scale
+      return false;
+    }
+    if (sub_pic_hrd && !br->SkipBits(4)) {  // cpb_size_du_scale
+      return false;
+    }
+    if (!br->SkipBits(15)) {  // three *_length_minus1 fields
+      return false;
+    }
+  }
+  for (uint32_t i = 0; i <= max_sub_layers_minus1; ++i) {
+    bool fixed_pic_rate_general = false;
+    bool fixed_pic_rate_within_cvs = true;
+    bool low_delay_hrd = false;
+    uint32_t cpb_cnt_minus1 = 0;
+    if (!br->ReadFlag(&fixed_pic_rate_general)) {
+      return false;
+    }
+    if (!fixed_pic_rate_general && !br->ReadFlag(&fixed_pic_rate_within_cvs)) {
+      return false;
+    }
+    if (fixed_pic_rate_within_cvs) {
+      uint32_t elemental_duration = 0;
+      if (!br->ReadUe(&elemental_duration)) {
+        return false;
+      }
+    } else if (!br->ReadFlag(&low_delay_hrd)) {
+      return false;
+    }
+    if (!low_delay_hrd) {
+      if (!br->ReadUe(&cpb_cnt_minus1) || cpb_cnt_minus1 > 31) {
+        return false;  // spec bound; also caps the loop below
+      }
+    }
+    for (int nal_or_vcl = 0; nal_or_vcl < 2; ++nal_or_vcl) {
+      const bool present = (nal_or_vcl == 0) ? nal_hrd : vcl_hrd;
+      if (!present) {
+        continue;
+      }
+      for (uint32_t j = 0; j <= cpb_cnt_minus1; ++j) {
+        uint32_t ignore = 0;
+        if (!br->ReadUe(&ignore) ||
+            !br->ReadUe(&ignore)) {  // bit_rate/cpb_size
+          return false;
+        }
+        if (sub_pic_hrd &&
+            (!br->ReadUe(&ignore) || !br->ReadUe(&ignore))) {  // du values
+          return false;
+        }
+        if (!br->SkipBits(1)) {  // cbr_flag
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+// vui_parameters (clause E.2.1). Consumed and discarded to reach the SPS
+// extension.
+bool SkipVui(BitReader* br, uint32_t max_sub_layers_minus1) {
+  bool flag = false;
+  if (!br->ReadFlag(&flag)) {  // aspect_ratio_info_present_flag
+    return false;
+  }
+  if (flag) {
+    uint32_t aspect_ratio_idc = 0;
+    if (!br->ReadBits(8, &aspect_ratio_idc)) {
+      return false;
+    }
+    if (aspect_ratio_idc == 255 && !br->SkipBits(32)) {  // EXTENDED_SAR
+      return false;
+    }
+  }
+  if (!br->ReadFlag(&flag)) {  // overscan_info_present_flag
+    return false;
+  }
+  if (flag && !br->SkipBits(1)) {  // overscan_appropriate_flag
+    return false;
+  }
+  if (!br->ReadFlag(&flag)) {  // video_signal_type_present_flag
+    return false;
+  }
+  if (flag) {
+    if (!br->SkipBits(4)) {  // video_format + video_full_range_flag
+      return false;
+    }
+    bool colour_desc = false;
+    if (!br->ReadFlag(&colour_desc)) {
+      return false;
+    }
+    if (colour_desc && !br->SkipBits(24)) {  // primaries/transfer/matrix
+      return false;
+    }
+  }
+  if (!br->ReadFlag(&flag)) {  // chroma_loc_info_present_flag
+    return false;
+  }
+  if (flag) {
+    uint32_t ignore = 0;
+    if (!br->ReadUe(&ignore) || !br->ReadUe(&ignore)) {
+      return false;
+    }
+  }
+  if (!br->SkipBits(3)) {  // neutral_chroma / field_seq / frame_field_info
+    return false;
+  }
+  if (!br->ReadFlag(&flag)) {  // default_display_window_flag
+    return false;
+  }
+  if (flag) {
+    uint32_t ignore = 0;
+    for (int i = 0; i < 4; ++i) {
+      if (!br->ReadUe(&ignore)) {
+        return false;
+      }
+    }
+  }
+  bool vui_timing = false;
+  if (!br->ReadFlag(&vui_timing)) {  // vui_timing_info_present_flag
+    return false;
+  }
+  if (vui_timing) {
+    if (!br->SkipBits(32) || !br->SkipBits(32)) {  // units_in_tick + time_scale
+      return false;
+    }
+    bool poc_proportional = false;
+    if (!br->ReadFlag(&poc_proportional)) {
+      return false;
+    }
+    if (poc_proportional) {
+      uint32_t ignore = 0;
+      if (!br->ReadUe(&ignore)) {
+        return false;
+      }
+    }
+    bool hrd_present = false;
+    if (!br->ReadFlag(&hrd_present)) {
+      return false;
+    }
+    if (hrd_present && !SkipHrdParameters(br, max_sub_layers_minus1)) {
+      return false;
+    }
+  }
+  bool bitstream_restriction = false;
+  if (!br->ReadFlag(&bitstream_restriction)) {
+    return false;
+  }
+  if (bitstream_restriction) {
+    if (!br->SkipBits(3)) {  // three restriction flags
+      return false;
+    }
+    uint32_t ignore = 0;
+    for (int i = 0; i < 5; ++i) {  // five ue fields
+      if (!br->ReadUe(&ignore)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// sps_range_extension (clause 7.3.2.2.2): nine coding-tool flags.
+bool ParseSpsRangeExtension(BitReader* br, SpsRangeExtension* out) {
+  return br->ReadFlag(&out->transform_skip_rotation_enabled_flag) &&
+         br->ReadFlag(&out->transform_skip_context_enabled_flag) &&
+         br->ReadFlag(&out->implicit_rdpcm_enabled_flag) &&
+         br->ReadFlag(&out->explicit_rdpcm_enabled_flag) &&
+         br->ReadFlag(&out->extended_precision_processing_flag) &&
+         br->ReadFlag(&out->intra_smoothing_disabled_flag) &&
+         br->ReadFlag(&out->high_precision_offsets_enabled_flag) &&
+         br->ReadFlag(&out->persistent_rice_adaptation_enabled_flag) &&
+         br->ReadFlag(&out->cabac_bypass_alignment_enabled_flag);
+}
+
 }  // namespace
 
 // st_ref_pic_set (clause 7.3.7). For an SPS-defined set (st_rps_idx <
@@ -466,8 +657,38 @@ bool ParseSps(const uint8_t* rbsp, size_t size, Sps* out) {
     return false;
   }
 
-  // Everything past here (VUI, extensions) is not needed to size the decoder or
-  // to parse the slice-segment header, so the parse stops here.
+  // VUI and the SPS extensions. The VUI is skipped; the range extension carries
+  // coding-tool flags a decoder needs for the 4:2:2 / 4:4:4 profiles. Skipping
+  // the VUI must be exact to land on the extension flags.
+  bool vui_present = false;
+  if (!br.ReadFlag(&vui_present)) {
+    return false;
+  }
+  if (vui_present && !SkipVui(&br, max_sub_layers_minus1)) {
+    return false;
+  }
+  bool sps_extension_present = false;
+  if (!br.ReadFlag(&sps_extension_present)) {
+    return false;
+  }
+  if (sps_extension_present) {
+    bool sps_multilayer_extension = false;
+    bool sps_3d_extension = false;
+    bool sps_scc_extension = false;
+    uint32_t sps_extension_4bits = 0;
+    if (!br.ReadFlag(&sps.sps_range_extension_flag) ||
+        !br.ReadFlag(&sps_multilayer_extension) ||
+        !br.ReadFlag(&sps_3d_extension) || !br.ReadFlag(&sps_scc_extension) ||
+        !br.ReadBits(4, &sps_extension_4bits)) {
+      return false;
+    }
+    if (sps.sps_range_extension_flag &&
+        !ParseSpsRangeExtension(&br, &sps.range_extension)) {
+      return false;
+    }
+    // The multilayer / 3D / SCC / reserved extensions are not parsed; nothing
+    // after them is consumed.
+  }
 
   // Conformance-window cropping. SubWidthC/SubHeightC follow chroma_format_idc;
   // separate colour planes are coded as monochrome (1,1).
