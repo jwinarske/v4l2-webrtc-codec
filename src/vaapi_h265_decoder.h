@@ -1,0 +1,117 @@
+// SPDX-FileCopyrightText: 2026 Joel Winarske
+// SPDX-License-Identifier: MIT
+
+// VAAPI H.265 / HEVC decoder engine: the HEVC sibling of VaapiH264Decoder. It
+// decodes HEVC Main (8-bit 4:2:0) to NV12 on a VAAPI device and exports each
+// decoded surface as a dma-buf, presenting the same V4l2DmaFrame + Acquire /
+// Release contract the other engines do -- so everything downstream is shared.
+// libva is loaded at runtime (dlopen), so a single libwebrtc.so serves the Pi
+// (V4L2), AMD H.264, and AMD HEVC paths without a libva link dependency.
+//
+// This first stage decodes intra pictures (IDR / CRA / BLA and I slices); the
+// inter-prediction path -- POC derivation, the reference-picture-set to DPB
+// mapping, and the reference lists for P / B slices -- is built on top of the
+// picture-parameter machinery here in a follow-up.
+//
+// NOTE: compiled only when the libva headers are present (V4L2WC_HAVE_VAAPI),
+// alongside the H.264 VAAPI engine.
+#ifndef V4L2WC_SRC_VAAPI_H265_DECODER_H_
+#define V4L2WC_SRC_VAAPI_H265_DECODER_H_
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+#include "parse/h265/nal.h"
+#include "parse/h265/pps.h"
+#include "parse/h265/slice_header.h"
+#include "parse/h265/sps.h"
+#include "src/dma_decoder.h"  // V4l2DmaFrame, SubmitResult, IDmaDecoder
+#include "src/va_loader.h"
+
+namespace v4l2wc {
+
+class VaapiH265Decoder : public IDmaDecoder {
+ public:
+  // Opens `render_node` (e.g. /dev/dri/renderD128), dlopen's + initializes
+  // libva. The HEVC-Main VLD config, the NV12 surface pool (`pool_size`
+  // surfaces), and the decode context are created lazily on the first SPS
+  // (which carries the coded dimensions), mirroring the H.264 engine. Returns
+  // nullptr if libva is unavailable or the device has no HEVC VLD entrypoint.
+  static std::unique_ptr<VaapiH265Decoder> Create(const char* render_node,
+                                                  std::uint32_t pool_size);
+  ~VaapiH265Decoder() override;
+
+  VaapiH265Decoder(const VaapiH265Decoder&) = delete;
+  VaapiH265Decoder& operator=(const VaapiH265Decoder&) = delete;
+
+  // Decodes one Annex-B access unit (VAAPI is synchronous, so the frame is
+  // ready on return). Parses NALs, updates SPS/PPS, builds the VA buffers,
+  // drives the decode, and parks the decoded frame (latest-wins). kSourceChange
+  // when the resolution changes mid-stream.
+  SubmitResult SubmitBitstream(const std::uint8_t* data, std::size_t size,
+                               std::uint64_t timestamp) override;
+
+  // VAAPI decodes synchronously, so there is nothing to pump; always kOk.
+  DriveResult Drive() override;
+
+  // Hands out the parked decoded frame as borrowed dma-buf fds (exported via
+  // vaExportSurfaceHandle). capture_index is the surface slot, returned via
+  // Release. False when no frame is ready.
+  bool Acquire(V4l2DmaFrame* out) override;
+
+  // Returns a surface slot after the consumer is done: the check-out is cleared
+  // and the surface frees for reuse.
+  void Release(std::uint32_t slot) override;
+  void Flush() override;
+  void Drain() override;
+  std::uint32_t PoolSize() const override { return pool_size_; }
+
+ private:
+  VaapiH265Decoder();
+  bool EnsureConfigured(const h265::Sps& sps);
+  bool DecodeSlice(const h265::Nal& nal);
+  int PickFreeSlot();
+  void ExportSlot(std::uint32_t slot, std::uint64_t timestamp);
+
+  struct Slot {
+    Slot();
+    ~Slot();
+    Slot(const Slot&);
+    Slot& operator=(const Slot&);
+
+    std::uint32_t surface = 0;  // VASurfaceID
+    bool checked_out = false;   // Acquire'd, awaiting Release
+    // exported dma-buf (valid while checked_out)
+    int fd = -1;
+    std::uint32_t drm_fourcc = 0, num_planes = 0;
+    std::uint64_t modifier = 0;
+    std::uint32_t offsets[4] = {0, 0, 0, 0};
+    std::uint32_t pitches[4] = {0, 0, 0, 0};
+    std::uint32_t width = 0, height = 0;
+    std::uint64_t timestamp = 0;
+  };
+
+  va::VaApi va_{};
+  int drm_fd_ = -1;
+  void* dpy_ = nullptr;   // VADisplay
+  unsigned config_ = 0;   // VAConfigID
+  unsigned context_ = 0;  // VAContextID
+  bool configured_ = false;
+  std::uint32_t coded_w_ = 0, coded_h_ = 0;
+  std::uint32_t pool_size_ = 0;
+
+  h265::Sps sps_{};
+  h265::Pps pps_{};
+  bool have_sps_ = false, have_pps_ = false;
+
+  std::vector<Slot> slots_;
+
+  bool have_ready_ = false;
+  std::uint32_t ready_slot_ = 0;
+};
+
+}  // namespace v4l2wc
+
+#endif  // V4L2WC_SRC_VAAPI_H265_DECODER_H_

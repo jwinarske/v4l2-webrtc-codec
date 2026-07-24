@@ -12,6 +12,7 @@
 #include "src/v4l2_m2m_decoder.h"
 #if V4L2WC_HAVE_VAAPI
 #include "src/vaapi_h264_decoder.h"
+#include "src/vaapi_h265_decoder.h"
 #endif
 
 namespace v4l2wc {
@@ -39,14 +40,21 @@ std::unique_ptr<IDmaDecoder> CreateDmaDecoder(const DmaDecoderConfig& config) {
   }
 
 #if V4L2WC_HAVE_VAAPI
-  // VAAPI second: the desktop path. Only H.264 is implemented there. The pool
-  // covers the maximum DPB plus frames in flight to the compositor.
-  if (config.codec_fourcc == V4L2_PIX_FMT_H264) {
+  // VAAPI second: the desktop path, for H.264 and HEVC. The pool covers the
+  // maximum DPB plus frames in flight to the compositor.
+  if (config.codec_fourcc == V4L2_PIX_FMT_H264 ||
+      config.codec_fourcc == V4L2_PIX_FMT_HEVC) {
     const char* node =
         (config.vaapi_render_node != nullptr && config.vaapi_render_node[0])
             ? config.vaapi_render_node
             : "/dev/dri/renderD128";
-    if (auto vaapi = VaapiH264Decoder::Create(node, /*pool_size=*/28)) {
+    std::unique_ptr<IDmaDecoder> vaapi =
+        config.codec_fourcc == V4L2_PIX_FMT_HEVC
+            ? std::unique_ptr<IDmaDecoder>(
+                  VaapiH265Decoder::Create(node, /*pool_size=*/28))
+            : std::unique_ptr<IDmaDecoder>(
+                  VaapiH264Decoder::Create(node, /*pool_size=*/28));
+    if (vaapi) {
       V4L2WC_LOG(V4L2WC_INFO) << "v4l2wc: VAAPI decoder " << config.coded_width
                               << "x" << config.coded_height;
       return vaapi;

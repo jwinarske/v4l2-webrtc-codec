@@ -17,6 +17,7 @@
 #include "src/v4l2_m2m_decoder.h"
 #if V4L2WC_HAVE_VAAPI
 #include "src/vaapi_h264_decoder.h"
+#include "src/vaapi_h265_decoder.h"
 #endif
 
 static int g_failures = 0;
@@ -64,11 +65,15 @@ int main() {
   CHECK(g_sink_calls >= 1);
 
 #if V4L2WC_HAVE_VAAPI
-  // The VAAPI engine likewise links and refuses a render node that is not
-  // there. dlopen'ing libva is fine; the missing node is what fails.
+  // The VAAPI engines likewise link and refuse a render node that is not there.
+  // dlopen'ing libva is fine; the missing node is what fails. Both the H.264
+  // and HEVC engines take the same path.
   auto vaapi =
       v4l2wc::VaapiH264Decoder::Create("/dev/dri/v4l2wc-nonexistent", 8);
   CHECK(vaapi == nullptr);
+  auto vaapi_h265 =
+      v4l2wc::VaapiH265Decoder::Create("/dev/dri/v4l2wc-nonexistent", 8);
+  CHECK(vaapi_h265 == nullptr);
 #endif
 
   // The factory runs the whole engine-selection probe: it tries the V4L2 path,
@@ -82,6 +87,12 @@ int main() {
   config.vaapi_render_node = "/dev/dri/v4l2wc-nonexistent";
   auto picked = v4l2wc::CreateDmaDecoder(config);
   CHECK(picked == nullptr);
+
+  // The HEVC path routes through the factory the same way and also returns
+  // nullptr when neither device is present.
+  config.codec_fourcc = V4L2_PIX_FMT_HEVC;
+  auto picked_h265 = v4l2wc::CreateDmaDecoder(config);
+  CHECK(picked_h265 == nullptr);
 
   v4l2wc::SetLogSink(nullptr);  // restore the default sink
 

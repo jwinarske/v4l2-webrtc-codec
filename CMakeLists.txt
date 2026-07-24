@@ -82,7 +82,8 @@ target_compile_options(v4l2wc_core PRIVATE -Wall -Wextra)
 if(V4L2WC_VA_INCLUDE)
   target_sources(v4l2wc_core PRIVATE
     src/va_loader.cc
-    src/vaapi_h264_decoder.cc)
+    src/vaapi_h264_decoder.cc
+    src/vaapi_h265_decoder.cc)
   target_include_directories(v4l2wc_core PRIVATE ${V4L2WC_VA_INCLUDE})
   target_link_libraries(v4l2wc_core PUBLIC ${CMAKE_DL_LIBS})
   target_compile_definitions(v4l2wc_core PUBLIC V4L2WC_HAVE_VAAPI=1)
