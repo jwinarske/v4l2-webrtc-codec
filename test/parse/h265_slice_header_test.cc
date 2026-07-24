@@ -217,6 +217,90 @@ int main() {
     CHECK(!ParseSliceHeader(&dummy, 1, NalUnitType::kTrailN, ctx, nullptr));
   }
 
+  // Synthetic P slice exercising ref_pic_lists_modification: an SPS-defined RPS
+  // with two used references and an L0 reorder that swaps them.
+  {
+    SliceContext mctx;
+    mctx.pic_size_in_ctbs = 1;  // first slice, so no segment address
+    mctx.log2_max_pic_order_cnt_lsb = 4;
+    mctx.chroma_array_type = 1;
+    mctx.lists_modification_present_flag = true;
+    ShortTermRps rps;
+    rps.num_negative_pics = 2;
+    rps.num_delta_pocs = 2;
+    rps.delta_poc_s0[0] = -1;
+    rps.delta_poc_s0[1] = -2;
+    rps.used_s0[0] = true;
+    rps.used_s0[1] = true;
+    mctx.short_term_rps = {rps};
+
+    BitWriter w;
+    w.WriteFlag(true);  // first_slice_segment_in_pic_flag
+    w.WriteUe(0);       // slice_pic_parameter_set_id
+    w.WriteUe(1);       // slice_type = P
+    w.WriteBits(5, 4);  // slice_pic_order_cnt_lsb
+    w.WriteFlag(true);  // short_term_ref_pic_set_sps_flag (num_st_rps == 1)
+    // (no SAO, no temporal MVP.) P-slice reference block:
+    w.WriteFlag(true);  // num_ref_idx_active_override_flag
+    w.WriteUe(1);       // num_ref_idx_l0_active_minus1 = 1 (two active)
+    // ref_pic_lists_modification: NumPicTotalCurr = 2, so entry width is 1 bit.
+    w.WriteFlag(true);  // ref_pic_list_modification_flag_l0
+    w.WriteBits(1, 1);  // list_entry_l0[0] = 1
+    w.WriteBits(0, 1);  // list_entry_l0[1] = 0
+    w.WriteUe(0);       // five_minus_max_num_merge_cand
+    w.WriteUe(0);       // slice_qp_delta se(0) == ue(0)
+    w.WriteFlag(true);  // byte_alignment: alignment_bit_equal_to_one
+    const std::vector<uint8_t> rbsp = w.bytes();
+
+    SliceHeader sh;
+    const bool ok = ParseSliceHeader(rbsp.data(), rbsp.size(),
+                                     NalUnitType::kTrailR, mctx, &sh);
+    CHECK(ok);
+    CHECK(sh.slice_type == SliceType::kP);
+    CHECK(sh.num_pic_total_curr == 2);
+    CHECK(sh.num_ref_idx_l0_active_minus1 == 1);
+    CHECK(sh.ref_pic_list_modification_flag_l0 == true);
+    CHECK(sh.list_entry_l0[0] == 1);
+    CHECK(sh.list_entry_l0[1] == 0);
+  }
+
+  // A list_entry that indexes outside the temporary list (>= NumPicTotalCurr)
+  // is rejected. With three references the entry is 2 bits wide, so the value 3
+  // is representable but out of range.
+  {
+    SliceContext mctx;
+    mctx.pic_size_in_ctbs = 1;
+    mctx.log2_max_pic_order_cnt_lsb = 4;
+    mctx.chroma_array_type = 1;
+    mctx.lists_modification_present_flag = true;
+    ShortTermRps rps;
+    rps.num_negative_pics = 3;
+    rps.num_delta_pocs = 3;
+    rps.delta_poc_s0[0] = -1;
+    rps.delta_poc_s0[1] = -2;
+    rps.delta_poc_s0[2] = -3;
+    rps.used_s0[0] = true;
+    rps.used_s0[1] = true;
+    rps.used_s0[2] = true;
+    mctx.short_term_rps = {rps};
+
+    BitWriter w;
+    w.WriteFlag(true);  // first_slice_segment_in_pic_flag
+    w.WriteUe(0);       // slice_pic_parameter_set_id
+    w.WriteUe(1);       // slice_type = P
+    w.WriteBits(5, 4);  // slice_pic_order_cnt_lsb
+    w.WriteFlag(true);  // short_term_ref_pic_set_sps_flag
+    w.WriteFlag(true);  // num_ref_idx_active_override_flag
+    w.WriteUe(0);       // num_ref_idx_l0_active_minus1 = 0 (one active)
+    w.WriteFlag(true);  // ref_pic_list_modification_flag_l0
+    w.WriteBits(3, 2);  // list_entry_l0[0] = 3 >= NumPicTotalCurr 3 -> reject
+    const std::vector<uint8_t> rbsp = w.bytes();
+
+    SliceHeader sh;
+    CHECK(!ParseSliceHeader(rbsp.data(), rbsp.size(), NalUnitType::kTrailR,
+                            mctx, &sh));
+  }
+
   // Synthetic dependent slice segment: parsing ends after the segment address.
   {
     SliceContext dctx;

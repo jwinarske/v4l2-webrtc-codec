@@ -35,31 +35,30 @@ uint32_t CeilLog2(uint32_t n) {
   return bits;
 }
 
-// ref_pic_lists_modification (clause 7.3.6.2). Consumed and discarded; only
-// correct advancement matters for the slice_data offset. list_entry_lX are
-// u(Ceil(Log2(NumPicTotalCurr))).
-bool SkipRefPicListsModification(BitReader* br, const SliceContext& ctx,
-                                 const SliceHeader& sh) {
-  const uint32_t entry_bits = CeilLog2(sh.num_pic_total_curr);
-  bool ref_pic_list_modification_flag_l0 = false;
-  if (!br->ReadFlag(&ref_pic_list_modification_flag_l0)) {
+// ref_pic_lists_modification (clause 7.3.6.2), stored into sh. list_entry_lX
+// are u(Ceil(Log2(NumPicTotalCurr))) and each must index the temporary
+// reference list, i.e. be < NumPicTotalCurr.
+bool ParseRefPicListsModification(BitReader* br, SliceHeader* sh) {
+  const uint32_t entry_bits = CeilLog2(sh->num_pic_total_curr);
+  if (!br->ReadFlag(&sh->ref_pic_list_modification_flag_l0)) {
     return false;
   }
-  if (ref_pic_list_modification_flag_l0) {
-    for (uint32_t i = 0; i <= sh.num_ref_idx_l0_active_minus1; ++i) {
-      if (!br->SkipBits(entry_bits)) {  // list_entry_l0[i]
+  if (sh->ref_pic_list_modification_flag_l0) {
+    for (uint32_t i = 0; i <= sh->num_ref_idx_l0_active_minus1; ++i) {
+      if (!br->ReadBits(entry_bits, &sh->list_entry_l0[i]) ||
+          sh->list_entry_l0[i] >= sh->num_pic_total_curr) {
         return false;
       }
     }
   }
-  if (sh.slice_type == SliceType::kB) {
-    bool ref_pic_list_modification_flag_l1 = false;
-    if (!br->ReadFlag(&ref_pic_list_modification_flag_l1)) {
+  if (sh->slice_type == SliceType::kB) {
+    if (!br->ReadFlag(&sh->ref_pic_list_modification_flag_l1)) {
       return false;
     }
-    if (ref_pic_list_modification_flag_l1) {
-      for (uint32_t i = 0; i <= sh.num_ref_idx_l1_active_minus1; ++i) {
-        if (!br->SkipBits(entry_bits)) {  // list_entry_l1[i]
+    if (sh->ref_pic_list_modification_flag_l1) {
+      for (uint32_t i = 0; i <= sh->num_ref_idx_l1_active_minus1; ++i) {
+        if (!br->ReadBits(entry_bits, &sh->list_entry_l1[i]) ||
+            sh->list_entry_l1[i] >= sh->num_pic_total_curr) {
           return false;
         }
       }
@@ -324,7 +323,7 @@ bool ParseSliceHeader(const uint8_t* rbsp, size_t size, NalUnitType nal_type,
       }
     }
     if (ctx.lists_modification_present_flag && sh.num_pic_total_curr > 1 &&
-        !SkipRefPicListsModification(&br, ctx, sh)) {
+        !ParseRefPicListsModification(&br, &sh)) {
       return false;
     }
     if (sh.slice_type == SliceType::kB && !br.ReadFlag(&sh.mvd_l1_zero_flag)) {

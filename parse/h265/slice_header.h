@@ -134,6 +134,15 @@ struct SliceHeader {
   // weighted_bipred_flag); otherwise left default.
   PredWeightTable pred_weight;
 
+  // ref_pic_lists_modification (clause 7.3.6.2). The flags are set only when
+  // lists_modification_present_flag is set and NumPicTotalCurr > 1; list_entry
+  // is valid for indices 0..num_ref_idx_lX_active_minus1 and each entry is an
+  // index into the temporary reference list (< NumPicTotalCurr).
+  bool ref_pic_list_modification_flag_l0 = false;
+  bool ref_pic_list_modification_flag_l1 = false;
+  uint32_t list_entry_l0[kMaxSliceRefs] = {};
+  uint32_t list_entry_l1[kMaxSliceRefs] = {};
+
   // NumPicTotalCurr (clause 7.4.7.2): the number of reference pictures used by
   // the current picture, which gates ref_pic_lists_modification and sizes its
   // list_entry fields.
