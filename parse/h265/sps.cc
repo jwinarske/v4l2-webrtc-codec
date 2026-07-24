@@ -397,6 +397,15 @@ bool ParseSps(const uint8_t* rbsp, size_t size, Sps* out) {
   if (sps.log2_ctb_size < 4 || sps.log2_ctb_size > 6) {
     return false;
   }
+  // Transform-block geometry and hierarchy depths, kept for the decoder's
+  // picture parameters. log2_min_tb_size is 2..5 and never exceeds the CTB.
+  if (log2_min_tb_minus2 > 3 || log2_diff_max_min_tb > 3) {
+    return false;
+  }
+  sps.log2_min_tb_size = log2_min_tb_minus2 + 2;
+  sps.log2_diff_max_min_tb_size = log2_diff_max_min_tb;
+  sps.max_transform_hierarchy_depth_inter = max_transform_hierarchy_inter;
+  sps.max_transform_hierarchy_depth_intra = max_transform_hierarchy_intra;
   const uint32_t ctb_size = 1u << sps.log2_ctb_size;
   sps.pic_width_in_ctbs =
       (sps.pic_width_in_luma_samples + ctb_size - 1) / ctb_size;

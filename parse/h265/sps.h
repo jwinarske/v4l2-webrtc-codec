@@ -79,6 +79,10 @@ struct Sps {
   // slice_segment_address is u(Ceil(Log2(pic_size_in_ctbs))).
   uint32_t log2_min_cb_size = 3;
   uint32_t log2_ctb_size = 4;
+  uint32_t log2_min_tb_size = 2;  // transform block, minus2 + 2
+  uint32_t log2_diff_max_min_tb_size = 0;
+  uint32_t max_transform_hierarchy_depth_inter = 0;
+  uint32_t max_transform_hierarchy_depth_intra = 0;
   uint32_t pic_width_in_ctbs = 0;
   uint32_t pic_height_in_ctbs = 0;
   uint32_t pic_size_in_ctbs = 0;
