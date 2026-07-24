@@ -3,6 +3,7 @@
 
 /out/
 /build/
+/build-*/
 *.o
 *.a
 *.so
