@@ -73,4 +73,16 @@ if(EGL_LIB AND GLES_LIB AND GBM_LIB AND GBM_INCLUDE_DIR)
   target_include_directories(pi_hevc_egl PRIVATE ${REPO_ROOT} ${GBM_INCLUDE_DIR})
   target_link_libraries(pi_hevc_egl PRIVATE ${EGL_LIB} ${GLES_LIB} ${GBM_LIB})
   target_compile_options(pi_hevc_egl PRIVATE -Wall -Wextra)
+
+  # Producer seam for the host->encode path: render an RGBA frame, pack it to
+  # NV12 on the GPU straight into one dma-buf, and feed it zero-copy to the V4L2
+  # hardware H.264 encoder -- the inverse of pi_hevc_egl. GLESv2 also provides
+  # the GLES3 entry points this uses (R8 render targets).
+  add_executable(pi_gl_encode
+    pi_gl_encode.cc
+    ${REPO_ROOT}/src/v4l2_m2m_encoder.cc
+    ${REPO_ROOT}/src/log.cc)
+  target_include_directories(pi_gl_encode PRIVATE ${REPO_ROOT} ${GBM_INCLUDE_DIR})
+  target_link_libraries(pi_gl_encode PRIVATE ${EGL_LIB} ${GLES_LIB} ${GBM_LIB})
+  target_compile_options(pi_gl_encode PRIVATE -Wall -Wextra)
 endif()
