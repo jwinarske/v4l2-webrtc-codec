@@ -33,7 +33,10 @@ constexpr std::uint32_t kDrmFormatNV12 = 0x3231564e;  // 'NV12' (8-bit 4:2:0)
 constexpr std::uint32_t kDrmFormatP030 = 0x30333050;  // 'P030' (10-bit packed)
 std::uint64_t Sand128ColHeight(std::uint32_t col_h) {
   constexpr std::uint64_t kVendorBroadcom = 7;
-  constexpr std::uint64_t kSand128 = 3;
+  // fourcc_mod_broadcom_code(4, v): the SAND128 (128-byte column) tiling. Code
+  // 3 is SAND64 and code 5 is SAND256 -- the wrong one silently mis-tiles a KMS
+  // plane or a GL import, so it must match the actual 128-byte column layout.
+  constexpr std::uint64_t kSand128 = 4;
   return (kVendorBroadcom << 56) |
          ((static_cast<std::uint64_t>(col_h) << 8) | kSand128);
 }
