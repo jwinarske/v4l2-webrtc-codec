@@ -254,6 +254,25 @@ int main() {
     CHECK(sps.general_profile_idc == 2);  // Main 10
   }
 
+  // A real SPS with a VUI color description (libx265, colorprim/transfer/
+  // colormatrix=bt709, range=limited): the video_signal_type is captured so a
+  // presentation layer can convert YUV to RGB with the right coefficients.
+  {
+    Sps sps;
+    const bool ok = ParseSpsFromNal(
+        {0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00,
+         0x03, 0x00, 0x00, 0x03, 0x00, 0x3c, 0xa0, 0x0a, 0x08, 0x0f, 0x16, 0x59,
+         0x59, 0xa4, 0x93, 0x2b, 0xc0, 0x5a, 0x80, 0x80, 0x80, 0x82, 0x00, 0x00,
+         0x03, 0x00, 0x02, 0x00, 0x00, 0x03, 0x00, 0x32, 0x10, 0x00},
+        &sps);
+    CHECK(ok);
+    CHECK(sps.colour_description_present_flag);
+    CHECK(sps.colour_primaries == 1);          // BT.709
+    CHECK(sps.transfer_characteristics == 1);  // BT.709
+    CHECK(sps.matrix_coeffs == 1);             // BT.709
+    CHECK(!sps.video_full_range_flag);         // limited (studio) range
+  }
+
   // Truncating a real SPS must fail rather than read past the buffer.
   {
     Sps sps;

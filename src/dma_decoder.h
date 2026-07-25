@@ -35,6 +35,15 @@ struct V4l2DmaFrame {
   std::array<std::uint32_t, kMaxPlanes> pitches{0, 0, 0, 0};
   std::uint64_t timestamp = 0;  // opaque passthrough: a PTS for HLS, an RTP ts
                                 // for WebRTC; the engine never interprets it
+
+  // Colorimetry from the bitstream VUI (H.265 Table E.3/E.4/E.5), or the
+  // "unspecified" default (2) when the stream omits it. A sink maps these onto
+  // its color model so YUV converts to RGB correctly; a YUV frame with the
+  // wrong matrix is the classic washed-out / oversaturated video.
+  std::uint8_t colour_primaries = 2;
+  std::uint8_t transfer_characteristics = 2;
+  std::uint8_t matrix_coefficients = 2;
+  bool video_full_range = false;
 };
 
 // What a Drive() pass found. A resolution change is not an error: the stream

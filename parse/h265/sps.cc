@@ -142,9 +142,9 @@ bool SkipHrdParameters(BitReader* br, uint32_t max_sub_layers_minus1) {
   return true;
 }
 
-// vui_parameters (clause E.2.1). Consumed and discarded to reach the SPS
-// extension.
-bool SkipVui(BitReader* br, uint32_t max_sub_layers_minus1) {
+// vui_parameters (clause E.2.1). Captures the video-signal-type color
+// description into `sps`; the rest is consumed to reach the SPS extension.
+bool ParseVui(BitReader* br, uint32_t max_sub_layers_minus1, Sps* sps) {
   bool flag = false;
   if (!br->ReadFlag(&flag)) {  // aspect_ratio_info_present_flag
     return false;
@@ -168,15 +168,24 @@ bool SkipVui(BitReader* br, uint32_t max_sub_layers_minus1) {
     return false;
   }
   if (flag) {
-    if (!br->SkipBits(4)) {  // video_format + video_full_range_flag
+    if (!br->SkipBits(3)) {  // video_format
       return false;
     }
-    bool colour_desc = false;
-    if (!br->ReadFlag(&colour_desc)) {
+    if (!br->ReadFlag(&sps->video_full_range_flag)) {
       return false;
     }
-    if (colour_desc && !br->SkipBits(24)) {  // primaries/transfer/matrix
+    if (!br->ReadFlag(&sps->colour_description_present_flag)) {
       return false;
+    }
+    if (sps->colour_description_present_flag) {
+      uint32_t cp = 0, tc = 0, mc = 0;
+      if (!br->ReadBits(8, &cp) || !br->ReadBits(8, &tc) ||
+          !br->ReadBits(8, &mc)) {
+        return false;
+      }
+      sps->colour_primaries = static_cast<uint8_t>(cp);
+      sps->transfer_characteristics = static_cast<uint8_t>(tc);
+      sps->matrix_coeffs = static_cast<uint8_t>(mc);
     }
   }
   if (!br->ReadFlag(&flag)) {  // chroma_loc_info_present_flag
@@ -667,7 +676,7 @@ bool ParseSps(const uint8_t* rbsp, size_t size, Sps* out) {
   if (!br.ReadFlag(&vui_present)) {
     return false;
   }
-  if (vui_present && !SkipVui(&br, max_sub_layers_minus1)) {
+  if (vui_present && !ParseVui(&br, max_sub_layers_minus1, &sps)) {
     return false;
   }
   bool sps_extension_present = false;

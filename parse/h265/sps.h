@@ -123,6 +123,17 @@ struct Sps {
   bool sps_temporal_mvp_enabled_flag = false;
   bool strong_intra_smoothing_enabled_flag = false;
 
+  // Colorimetry from the VUI video_signal_type / colour_description (clause
+  // E.2.1). The codes are H.265 Table E.3 (colour_primaries), E.4 (transfer),
+  // E.5 (matrix_coeffs); 2 is "unspecified" and is the default when the VUI (or
+  // its color description) is absent. A presentation layer maps these onto its
+  // color model so a plane's CSC or a sampler converts YUV to RGB correctly.
+  bool colour_description_present_flag = false;
+  uint8_t colour_primaries = 2;
+  uint8_t transfer_characteristics = 2;
+  uint8_t matrix_coeffs = 2;
+  bool video_full_range_flag = false;
+
   // Range extension (present only for the range-extension profiles).
   bool sps_range_extension_flag = false;
   SpsRangeExtension range_extension;
