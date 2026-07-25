@@ -1,11 +1,22 @@
-# Cross-build manifest for the Pi stateless HEVC smoke test. Non-Flutter: one
-# plain CMake executable, no engine/backend needed.
+# Cross-build manifest for the Pi codec tools (non-Flutter: plain CMake
+# executables, no engine/backend). The GPU tools -- pi_hevc_egl, pi_hevc_kms,
+# pi_gl_encode -- link EGL/GLES/GBM/DRM, so name those raspios -dev packages
+# here, staged from partition 2 of the board image. The raspberry-pi board
+# layer also carries them; declaring them in the project keeps the dependency
+# with the code that needs it.
 id: pi-hevc-stateless
 type: app
 supported_archs: [arm64]
 supported_host_types: [fedora, ubuntu]
 cross:
   provider: arm-gnu
+  sysroot:
+    partition: 2
+    dev_packages:
+      - libegl-dev
+      - libgles2-mesa-dev
+      - libgbm-dev
+      - libdrm-dev
   package:
     name: pi-hevc-stateless
     bin: pi_hevc_stateless
