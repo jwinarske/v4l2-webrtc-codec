@@ -8,9 +8,11 @@
 // built. See src/v4l2_decoder.h.
 
 #include "api/video_codecs/video_decoder_factory.h"
+#include "api/video_codecs/video_encoder_factory.h"
 #include "rtc_base/logging.h"
 #include "src/log.h"
 #include "src/v4l2_decoder.h"
+#include "src/v4l2_encoder.h"
 #include "v4l2wc/v4l2wc.h"
 
 namespace {
@@ -49,6 +51,20 @@ void* v4l2wc_create_factory(const V4l2WcConfig* cfg) {
   // webrtc::VideoDecoderFactory* is value-correct (single inheritance).
   auto* factory = static_cast<webrtc::VideoDecoderFactory*>(
       new v4l2wc::V4l2DecoderFactory(config));
+  return factory;
+}
+
+void* v4l2wc_create_encoder_factory(const V4l2WcEncoderConfig* cfg) {
+  v4l2wc::SetLogSink(&ForwardToRtcLog);
+
+  V4l2WcEncoderConfig config{};
+  config.size = sizeof(V4l2WcEncoderConfig);
+  config.backend = V4L2WC_BACKEND_AUTO;
+  if (cfg) {
+    config = *cfg;
+  }
+  auto* factory = static_cast<webrtc::VideoEncoderFactory*>(
+      new v4l2wc::V4l2EncoderFactory(config));
   return factory;
 }
 
