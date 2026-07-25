@@ -62,6 +62,17 @@ class V4l2M2mEncoder {
   // emitted inline in every TU, matching the repo's chromium-style convention.
   V4l2M2mEncoder();
 
+  // Set up the OUTPUT queue on first use, once the memory model is known:
+  // V4L2_MEMORY_DMABUF for the zero-copy path, V4L2_MEMORY_MMAP (with a mapped
+  // scratch per buffer) for the CPU path. Idempotent.
+  bool EnsureOutput(bool dmabuf);
+  // Queue one raw NV12 frame on the OUTPUT queue: import the producer's dma-buf
+  // fd, or copy the CPU buffer into a mapped OUTPUT buffer. Returns the queued
+  // OUTPUT index, or -1 if no free buffer / ioctl error.
+  int QueueOutputDmabuf(const int* fds, const uint32_t* strides,
+                        uint32_t num_planes, uint64_t timestamp);
+  int QueueOutputCpu(const uint8_t* nv12, size_t size, uint64_t timestamp);
+
   // Shared tail of both Encode paths: pump the queues, read out one coded
   // buffer, reclaim the consumed OUTPUT buffer.
   bool DriveAndCollect(std::vector<uint8_t>* out, bool* keyframe);
@@ -77,9 +88,10 @@ class V4l2M2mEncoder {
   struct OutputBuffer {
     void* mmap_addr = nullptr;  // CPU path only
     size_t length = 0;
-    bool queued = false;
   };
   std::vector<OutputBuffer> output_buffers_;
+  std::vector<uint32_t> output_free_;  // indices available to queue
+  bool output_ready_ = false;          // OUTPUT queue set up + streaming
   bool output_dmabuf_ = false;  // true => OUTPUT imports dma-bufs, no mmap
 
   // CAPTURE (H.264) queue: MMAP, read coded bytes out via DQBUF bytesused.

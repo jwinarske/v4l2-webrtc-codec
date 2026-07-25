@@ -23,6 +23,7 @@ namespace v4l2wc {
 namespace {
 
 constexpr uint32_t kCaptureBufferCount = 4;
+constexpr uint32_t kOutputBufferCount = 4;
 
 int xioctl(int fd, unsigned long req, void* arg) {
   int r;
@@ -207,11 +208,6 @@ void V4l2M2mEncoder::SetFramerate(uint32_t framerate) {
   xioctl(fd_, VIDIOC_S_PARM, &parm);
 }
 
-// NOTE: EnsureOutput + the QBUF/DQBUF encode loop are the hardware-specific
-// core; this first cut wires the structure and the ioctl sequence. The dma-buf
-// import (OUTPUT memory = V4L2_MEMORY_DMABUF, plane m.fd = source fd) and the
-// coded-buffer read-out are marked where they attach.
-
 bool V4l2M2mEncoder::DriveAndCollect(std::vector<uint8_t>* out,
                                      bool* keyframe) {
   // Wait for a coded buffer, then dequeue it.
@@ -237,52 +233,180 @@ bool V4l2M2mEncoder::DriveAndCollect(std::vector<uint8_t>* out,
   *keyframe = (buf.flags & V4L2_BUF_FLAG_KEYFRAME) != 0;
   // Re-queue the coded buffer for the next frame.
   xioctl(fd_, VIDIOC_QBUF, &buf);
-  // Reclaim the consumed OUTPUT (raw) buffer.
-  v4l2_buffer obuf{};
-  v4l2_plane oplanes[VIDEO_MAX_PLANES]{};
-  obuf.type = OutputType(mplane_);
-  obuf.memory = output_dmabuf_ ? V4L2_MEMORY_DMABUF : V4L2_MEMORY_MMAP;
-  if (mplane_) {
-    obuf.length = 1;
-    obuf.m.planes = oplanes;
+  // Reclaim every consumed OUTPUT (raw) buffer so its slot -- and the imported
+  // dma-buf -- is free to queue again.
+  for (;;) {
+    v4l2_buffer obuf{};
+    v4l2_plane oplanes[VIDEO_MAX_PLANES]{};
+    obuf.type = OutputType(mplane_);
+    obuf.memory = output_dmabuf_ ? V4L2_MEMORY_DMABUF : V4L2_MEMORY_MMAP;
+    if (mplane_) {
+      obuf.length = 1;
+      obuf.m.planes = oplanes;
+    }
+    if (xioctl(fd_, VIDIOC_DQBUF, &obuf) < 0) {
+      break;  // EAGAIN: nothing more to reclaim this pass
+    }
+    output_free_.push_back(obuf.index);
   }
-  xioctl(fd_, VIDIOC_DQBUF, &obuf);  // best-effort reclaim
   return true;
+}
+
+bool V4l2M2mEncoder::EnsureOutput(bool dmabuf) {
+  if (output_ready_) {
+    return true;
+  }
+  v4l2_requestbuffers req{};
+  req.count = kOutputBufferCount;
+  req.type = OutputType(mplane_);
+  req.memory = dmabuf ? V4L2_MEMORY_DMABUF : V4L2_MEMORY_MMAP;
+  if (xioctl(fd_, VIDIOC_REQBUFS, &req) < 0 || req.count == 0) {
+    return false;
+  }
+  output_buffers_.assign(req.count, OutputBuffer{});
+  output_free_.clear();
+  for (uint32_t i = 0; i < req.count; ++i) {
+    if (!dmabuf) {
+      // CPU path: map each OUTPUT buffer so a frame can be copied into it.
+      v4l2_buffer buf{};
+      v4l2_plane planes[VIDEO_MAX_PLANES]{};
+      buf.type = OutputType(mplane_);
+      buf.memory = V4L2_MEMORY_MMAP;
+      buf.index = i;
+      if (mplane_) {
+        buf.length = 1;
+        buf.m.planes = planes;
+      }
+      if (xioctl(fd_, VIDIOC_QUERYBUF, &buf) < 0) {
+        return false;
+      }
+      const uint32_t len = mplane_ ? planes[0].length : buf.length;
+      const uint32_t off = mplane_ ? planes[0].m.mem_offset : buf.m.offset;
+      void* addr =
+          ::mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, off);
+      if (addr == MAP_FAILED) {
+        return false;
+      }
+      output_buffers_[i] = {addr, len};
+    }
+    output_free_.push_back(i);
+  }
+  uint32_t otype = OutputType(mplane_);
+  if (xioctl(fd_, VIDIOC_STREAMON, &otype) < 0) {
+    return false;
+  }
+  output_dmabuf_ = dmabuf;
+  output_ready_ = true;
+  return true;
+}
+
+int V4l2M2mEncoder::QueueOutputDmabuf(const int* fds, const uint32_t* strides,
+                                      uint32_t num_planes, uint64_t timestamp) {
+  if (output_free_.empty() || num_planes == 0 || fds == nullptr) {
+    return -1;
+  }
+  const uint32_t index = output_free_.back();
+  // NV12 is imported as one contiguous plane referencing the producer's fd: the
+  // Y plane then interleaved CbCr, stride*height*3/2 bytes. (The descriptor may
+  // list two planes, but both share fds[0] and the packed layout is implicit.)
+  const uint32_t stride =
+      (strides != nullptr && strides[0] != 0) ? strides[0] : width_;
+  const uint32_t frame_bytes = stride * height_ * 3 / 2;
+  v4l2_buffer buf{};
+  v4l2_plane planes[VIDEO_MAX_PLANES]{};
+  buf.type = OutputType(mplane_);
+  buf.memory = V4L2_MEMORY_DMABUF;
+  buf.index = index;
+  buf.timestamp.tv_sec = static_cast<long>(timestamp / 1000000);
+  buf.timestamp.tv_usec = static_cast<long>(timestamp % 1000000);
+  if (mplane_) {
+    buf.length = 1;
+    buf.m.planes = planes;
+    planes[0].m.fd = fds[0];
+    planes[0].bytesused = frame_bytes;
+    planes[0].length = frame_bytes;
+    planes[0].data_offset = 0;
+  } else {
+    buf.m.fd = fds[0];
+    buf.bytesused = frame_bytes;
+    buf.length = frame_bytes;
+  }
+  if (xioctl(fd_, VIDIOC_QBUF, &buf) < 0) {
+    return -1;  // slot stays free
+  }
+  output_free_.pop_back();
+  return static_cast<int>(index);
+}
+
+int V4l2M2mEncoder::QueueOutputCpu(const uint8_t* nv12, size_t size,
+                                   uint64_t timestamp) {
+  if (output_free_.empty()) {
+    return -1;
+  }
+  const uint32_t index = output_free_.back();
+  const OutputBuffer& ob = output_buffers_[index];
+  if (ob.mmap_addr == nullptr || size > ob.length) {
+    return -1;
+  }
+  std::memcpy(ob.mmap_addr, nv12, size);
+  v4l2_buffer buf{};
+  v4l2_plane planes[VIDEO_MAX_PLANES]{};
+  buf.type = OutputType(mplane_);
+  buf.memory = V4L2_MEMORY_MMAP;
+  buf.index = index;
+  buf.timestamp.tv_sec = static_cast<long>(timestamp / 1000000);
+  buf.timestamp.tv_usec = static_cast<long>(timestamp % 1000000);
+  if (mplane_) {
+    buf.length = 1;
+    buf.m.planes = planes;
+    planes[0].bytesused = static_cast<uint32_t>(size);
+    planes[0].length = static_cast<uint32_t>(ob.length);
+  } else {
+    buf.bytesused = static_cast<uint32_t>(size);
+    buf.length = static_cast<uint32_t>(ob.length);
+  }
+  if (xioctl(fd_, VIDIOC_QBUF, &buf) < 0) {
+    return -1;
+  }
+  output_free_.pop_back();
+  return static_cast<int>(index);
 }
 
 bool V4l2M2mEncoder::EncodeDmabuf(const int* fds, const uint32_t* offsets,
                                   const uint32_t* strides, uint32_t num_planes,
-                                  uint64_t /*timestamp*/, bool force_keyframe,
+                                  uint64_t timestamp, bool force_keyframe,
                                   std::vector<uint8_t>* out, bool* keyframe) {
-  (void)offsets;
-  (void)strides;
+  (void)offsets;  // packed NV12: plane offsets are implicit in the format
   if (num_planes == 0 || fds == nullptr) {
+    return false;
+  }
+  if (!EnsureOutput(/*dmabuf=*/true)) {
     return false;
   }
   if (force_keyframe) {
     SetCtrl(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME, 1);
   }
-  // TODO(hw): lazy EnsureOutput(dmabuf=true) -> REQBUFS OUTPUT memory=DMABUF +
-  // STREAMON, then QBUF an OUTPUT buffer whose plane m.fd = fds[0]
-  // (V4L2_MEMORY_DMABUF), bytesused = strides[0]*height * 3/2. Zero-copy
-  // import.
-  output_dmabuf_ = true;
+  if (QueueOutputDmabuf(fds, strides, num_planes, timestamp) < 0) {
+    return false;
+  }
   return DriveAndCollect(out, keyframe);
 }
 
 bool V4l2M2mEncoder::EncodeCpu(const uint8_t* nv12, size_t size,
-                               uint64_t /*timestamp*/, bool force_keyframe,
+                               uint64_t timestamp, bool force_keyframe,
                                std::vector<uint8_t>* out, bool* keyframe) {
   if (nv12 == nullptr || size == 0) {
+    return false;
+  }
+  if (!EnsureOutput(/*dmabuf=*/false)) {
     return false;
   }
   if (force_keyframe) {
     SetCtrl(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME, 1);
   }
-  // TODO(hw): lazy EnsureOutput(dmabuf=false) -> REQBUFS OUTPUT memory=MMAP +
-  // mmap the buffers; memcpy nv12 into a free OUTPUT buffer, set bytesused =
-  // size, QBUF, then collect.
-  output_dmabuf_ = false;
+  if (QueueOutputCpu(nv12, size, timestamp) < 0) {
+    return false;
+  }
   return DriveAndCollect(out, keyframe);
 }
 
