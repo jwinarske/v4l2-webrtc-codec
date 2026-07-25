@@ -47,7 +47,7 @@ class V4l2M2mDecoder : public IDmaDecoder {
 
   // Copies a coded access unit into a free OUTPUT buffer and queues it.
   SubmitResult SubmitBitstream(const std::uint8_t* data, std::size_t size,
-                               std::uint64_t rtp_timestamp) override;
+                               std::uint64_t timestamp) override;
 
   // Pumps events and dequeues completed buffers without blocking: reclaims
   // OUTPUT buffers, sets up CAPTURE on the first SOURCE_CHANGE, and parks the
@@ -62,6 +62,10 @@ class V4l2M2mDecoder : public IDmaDecoder {
 
   // Re-queues a previously acquired CAPTURE buffer for reuse.
   void Release(std::uint32_t capture_index) override;
+  // Restarts both queues to drop everything queued and decoded, for a seek.
+  void Flush() override;
+  // Sends the end-of-stream command so held frames are emitted.
+  void Drain() override;
   // The pool exists only after the CAPTURE queue is set up, so this reports
   // what was actually allocated rather than what was asked for.
   std::uint32_t PoolSize() const override {
@@ -83,6 +87,8 @@ class V4l2M2mDecoder : public IDmaDecoder {
 
   bool SetupCapture();  // on SOURCE_CHANGE
   void TeardownCapture();
+  // Queues CAPTURE buffer `index` back to the driver, marking it queued.
+  bool QueueCaptureBuffer(std::uint32_t index);
 
   int fd_ = -1;
   bool mplane_ = true;
@@ -104,7 +110,7 @@ class V4l2M2mDecoder : public IDmaDecoder {
 
   bool have_ready_ = false;
   std::uint32_t ready_index_ = 0;
-  std::uint64_t ready_rtp_ = 0;
+  std::uint64_t ready_timestamp_ = 0;
 };
 
 }  // namespace v4l2wc

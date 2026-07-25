@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Joel Winarske
 # SPDX-License-Identifier: MIT
 
-# Standalone dev/CI build of the pure-logic layers (bitstream parse/) and their
-# unit tests. No webrtc, no V4L2 — this builds and runs on the host so the
-# memory-safety-critical parsers are unit-tested and fuzzed off-target. The
-# decoder itself is absorbed into libwebrtc.so via BUILD.gn (lw_enable_v4l2_codec).
+# Standalone dev/CI build of the host-buildable layers: the bitstream parse/
+# parsers and the webrtc-free decode core (v4l2wc_core). Builds on the host so
+# the memory-safety-critical parsers are unit-tested and fuzzed off-target and
+# the engines are proven to link without webrtc. The full decoder is still
+# absorbed into libwebrtc.so via BUILD.gn (lw_enable_v4l2_codec).
 cmake_minimum_required(VERSION 3.16)
 project(v4l2_webrtc_codec_parse LANGUAGES CXX)
 
@@ -17,6 +18,11 @@ add_library(v4l2wc_parse STATIC
   parse/h264/sps.cc
   parse/h264/pps.cc
   parse/h264/slice_header.cc
+  parse/h265/nal.cc
+  parse/h265/sps.cc
+  parse/h265/pps.cc
+  parse/h265/scaling_list.cc
+  parse/h265/slice_header.cc
 )
 target_include_directories(v4l2wc_parse PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(v4l2wc_parse PRIVATE -Wall -Wextra)
@@ -36,6 +42,89 @@ add_test(NAME h264_pps_test COMMAND h264_pps_test)
 add_executable(h264_slice_header_test test/parse/h264_slice_header_test.cc)
 target_link_libraries(h264_slice_header_test PRIVATE v4l2wc_parse)
 add_test(NAME h264_slice_header_test COMMAND h264_slice_header_test)
+
+add_executable(h265_nal_test test/parse/h265_nal_test.cc)
+target_link_libraries(h265_nal_test PRIVATE v4l2wc_parse)
+add_test(NAME h265_nal_test COMMAND h265_nal_test)
+
+add_executable(h265_sps_test test/parse/h265_sps_test.cc)
+target_link_libraries(h265_sps_test PRIVATE v4l2wc_parse)
+add_test(NAME h265_sps_test COMMAND h265_sps_test)
+
+add_executable(h265_pps_test test/parse/h265_pps_test.cc)
+target_link_libraries(h265_pps_test PRIVATE v4l2wc_parse)
+add_test(NAME h265_pps_test COMMAND h265_pps_test)
+
+add_executable(h265_scaling_list_test test/parse/h265_scaling_list_test.cc)
+target_link_libraries(h265_scaling_list_test PRIVATE v4l2wc_parse)
+add_test(NAME h265_scaling_list_test COMMAND h265_scaling_list_test)
+
+add_executable(h265_slice_header_test test/parse/h265_slice_header_test.cc)
+target_link_libraries(h265_slice_header_test PRIVATE v4l2wc_parse)
+add_test(NAME h265_slice_header_test COMMAND h265_slice_header_test)
+
+# ---- webrtc-free decode core -----------------------------------------------
+# The decode engines, hoisted out of the libwebrtc build so a consumer that is
+# not webrtc (the ivi-homescreen HLS player plugin) can link them. The engines
+# log through the seam in src/log.h instead of RTC_LOG, so nothing here pulls
+# in webrtc.
+#
+# VAAPI needs the libva headers at build time; it dlopens the library itself at
+# runtime. Without the headers only the V4L2 M2M engine is built, which is the
+# right shape for a device (e.g. a Pi) that has no VAAPI anyway.
+find_path(V4L2WC_VA_INCLUDE va/va.h)
+
+add_library(v4l2wc_core STATIC
+  src/log.cc
+  src/dma_decoder.cc
+  src/dma_decoder_factory.cc
+  src/v4l2_m2m_decoder.cc
+  src/v4l2_stateless_h265_decoder.cc
+)
+target_link_libraries(v4l2wc_core PUBLIC v4l2wc_parse)
+target_include_directories(v4l2wc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(v4l2wc_core PRIVATE -Wall -Wextra)
+
+if(V4L2WC_VA_INCLUDE)
+  target_sources(v4l2wc_core PRIVATE
+    src/va_loader.cc
+    src/vaapi_h264_decoder.cc
+    src/vaapi_h265_decoder.cc)
+  target_include_directories(v4l2wc_core PRIVATE ${V4L2WC_VA_INCLUDE})
+  target_link_libraries(v4l2wc_core PUBLIC ${CMAKE_DL_LIBS})
+  target_compile_definitions(v4l2wc_core PUBLIC V4L2WC_HAVE_VAAPI=1)
+  message(STATUS "v4l2wc_core: VAAPI engine enabled (${V4L2WC_VA_INCLUDE})")
+else()
+  target_compile_definitions(v4l2wc_core PUBLIC V4L2WC_HAVE_VAAPI=0)
+  message(STATUS "v4l2wc_core: libva headers not found, VAAPI engine disabled")
+endif()
+
+add_executable(v4l2wc_core_test test/core/core_smoke_test.cc)
+target_link_libraries(v4l2wc_core_test PRIVATE v4l2wc_core)
+add_test(NAME v4l2wc_core_test COMMAND v4l2wc_core_test)
+
+# On-hardware tests need a real VAAPI/V4L2 device and a stream argument, so they
+# are opt-in and never registered with ctest. Validated on an AMD Radeon
+# (radeonsi): HEVC Main and Main 10 clips decode every frame with no driver
+# error. Run e.g.: ./vaapi_h265_hw_test main420.hevc /dev/dri/renderD128
+option(V4L2WC_ENABLE_HW_TESTS "Build tests that need a real VAAPI/V4L2 device"
+       OFF)
+if(V4L2WC_ENABLE_HW_TESTS AND V4L2WC_VA_INCLUDE)
+  add_executable(vaapi_h265_hw_test test/hw/vaapi_h265_hw_test.cc)
+  target_link_libraries(vaapi_h265_hw_test PRIVATE v4l2wc_core)
+
+  # The pixel test imports the decoder's dma-buf and detiles it via libva, so it
+  # links libva / libva-drm directly (the only place that does; the decode core
+  # still dlopens libva).
+  find_library(V4L2WC_LIBVA va)
+  find_library(V4L2WC_LIBVA_DRM va-drm)
+  if(V4L2WC_LIBVA AND V4L2WC_LIBVA_DRM)
+    add_executable(vaapi_h265_pixel_test test/hw/vaapi_h265_pixel_test.cc)
+    target_include_directories(vaapi_h265_pixel_test PRIVATE ${V4L2WC_VA_INCLUDE})
+    target_link_libraries(vaapi_h265_pixel_test
+      PRIVATE v4l2wc_core ${V4L2WC_LIBVA} ${V4L2WC_LIBVA_DRM})
+  endif()
+endif()
 
 # ---- fuzz gate -------------------------------------------------------------
 # The bitstream is attacker-controlled and reachable once DTLS is up, so the
@@ -59,10 +148,26 @@ check_cxx_source_compiles(
 unset(CMAKE_REQUIRED_FLAGS)
 
 if(V4L2WC_HAVE_LIBFUZZER)
-  foreach(target nal sps pps slice_header)
+  # Each entry pairs a fuzz target name with the parser sources its harness
+  # links, so a crash points at a single parser. The H.264 targets share the
+  # whole H.264 parser; the H.265 one links only its own translation unit.
+  set(_fuzz_nal_sources
+    parse/h264/nal.cc parse/h264/sps.cc parse/h264/pps.cc
+    parse/h264/slice_header.cc)
+  set(_fuzz_sps_sources ${_fuzz_nal_sources})
+  set(_fuzz_pps_sources ${_fuzz_nal_sources})
+  set(_fuzz_slice_header_sources ${_fuzz_nal_sources})
+  set(_fuzz_h265_nal_sources parse/h265/nal.cc)
+  set(_fuzz_h265_sps_sources parse/h265/sps.cc parse/h265/scaling_list.cc)
+  set(_fuzz_h265_pps_sources parse/h265/pps.cc parse/h265/scaling_list.cc)
+  set(_fuzz_h265_slice_header_sources
+    parse/h265/nal.cc parse/h265/sps.cc parse/h265/scaling_list.cc
+    parse/h265/slice_header.cc)
+  set(_fuzz_h265_scaling_list_sources parse/h265/scaling_list.cc)
+  foreach(target nal sps pps slice_header h265_nal h265_sps h265_pps
+                 h265_slice_header h265_scaling_list)
     add_executable(${target}_fuzzer test/fuzz/${target}_fuzzer.cc
-      parse/h264/nal.cc parse/h264/sps.cc parse/h264/pps.cc
-      parse/h264/slice_header.cc)
+      ${_fuzz_${target}_sources})
     target_include_directories(${target}_fuzzer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     # Sanitizers as well as the fuzzer: a bounds violation the fuzzer reaches
     # is only useful if something reports it rather than reading on.

@@ -47,7 +47,7 @@ class VaapiH264Decoder : public IDmaDecoder {
   // drives the decode, manages the sliding-window DPB, and parks the decoded
   // frame (latest-wins). kSourceChange when the resolution changes mid-stream.
   SubmitResult SubmitBitstream(const std::uint8_t* data, std::size_t size,
-                               std::uint64_t rtp_timestamp) override;
+                               std::uint64_t timestamp) override;
 
   // VAAPI decodes synchronously, so there is nothing to pump; always true.
   DriveResult Drive() override;
@@ -61,6 +61,8 @@ class VaapiH264Decoder : public IDmaDecoder {
   // dma-buf fd and frees the surface for reuse (unless it is still a
   // reference).
   void Release(std::uint32_t slot) override;
+  void Flush() override;
+  void Drain() override;
   std::uint32_t PoolSize() const override { return pool_size_; }
 
  private:
@@ -69,7 +71,7 @@ class VaapiH264Decoder : public IDmaDecoder {
   bool DecodeSlice(const h264::Nal& nal);
   int ComputePoc(const h264::SliceHeader& sh, int ref_idc);
   int PickFreeSlot();
-  void ExportSlot(std::uint32_t slot, std::uint64_t rtp);
+  void ExportSlot(std::uint32_t slot, std::uint64_t timestamp);
 
   struct Slot {
     Slot();
@@ -88,7 +90,7 @@ class VaapiH264Decoder : public IDmaDecoder {
     std::uint32_t offsets[4] = {0, 0, 0, 0};
     std::uint32_t pitches[4] = {0, 0, 0, 0};
     std::uint32_t width = 0, height = 0;
-    std::uint64_t rtp = 0;
+    std::uint64_t timestamp = 0;
   };
   struct RefEntry {
     std::uint32_t slot;

@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <cstring>
 
-#include "rtc_base/logging.h"
+#include "src/log.h"
 #include "va/va.h"
 #include "va/va_drm.h"
 #include "va/va_drmcommon.h"
@@ -19,28 +19,28 @@ std::unique_ptr<VaapiH264Decoder> VaapiH264Decoder::Create(
     const char* render_node, std::uint32_t pool_size) {
   auto dec = std::unique_ptr<VaapiH264Decoder>(new VaapiH264Decoder());
   if (!va::VaLoad(&dec->va_)) {
-    RTC_LOG(LS_WARNING) << "vaapi: libva unavailable (dlopen failed)";
+    V4L2WC_LOG(V4L2WC_WARNING) << "vaapi: libva unavailable (dlopen failed)";
     return nullptr;
   }
   dec->drm_fd_ = ::open(render_node, O_RDWR | O_CLOEXEC);
   if (dec->drm_fd_ < 0) {
-    RTC_LOG(LS_ERROR) << "vaapi: open(" << render_node << ") failed";
+    V4L2WC_LOG(V4L2WC_ERROR) << "vaapi: open(" << render_node << ") failed";
     return nullptr;
   }
   dec->dpy_ = dec->va_.GetDisplayDRM(dec->drm_fd_);
   if (!dec->dpy_) {
-    RTC_LOG(LS_ERROR) << "vaapi: vaGetDisplayDRM failed";
+    V4L2WC_LOG(V4L2WC_ERROR) << "vaapi: vaGetDisplayDRM failed";
     return nullptr;
   }
   int major = 0, minor = 0;
   VAStatus s = dec->va_.Initialize(dec->dpy_, &major, &minor);
   if (s != VA_STATUS_SUCCESS) {
-    RTC_LOG(LS_ERROR) << "vaapi: vaInitialize: " << dec->va_.ErrorStr(s);
+    V4L2WC_LOG(V4L2WC_ERROR) << "vaapi: vaInitialize: " << dec->va_.ErrorStr(s);
     return nullptr;
   }
   dec->pool_size_ = pool_size;
-  RTC_LOG(LS_INFO) << "vaapi: VA-API " << major << "." << minor << " on "
-                   << render_node;
+  V4L2WC_LOG(V4L2WC_INFO) << "vaapi: VA-API " << major << "." << minor << " on "
+                          << render_node;
   return dec;
 }
 
@@ -82,7 +82,7 @@ bool VaapiH264Decoder::EnsureConfigured(const h264::Sps& sps) {
   VAStatus s = va_.CreateConfig(dpy_, VAProfileH264ConstrainedBaseline,
                                 VAEntrypointVLD, &attr, 1, &cfg);
   if (s != VA_STATUS_SUCCESS) {
-    RTC_LOG(LS_ERROR) << "vaapi: CreateConfig: " << va_.ErrorStr(s);
+    V4L2WC_LOG(V4L2WC_ERROR) << "vaapi: CreateConfig: " << va_.ErrorStr(s);
     return false;
   }
   config_ = cfg;
@@ -93,7 +93,7 @@ bool VaapiH264Decoder::EnsureConfigured(const h264::Sps& sps) {
   s = va_.CreateSurfaces(dpy_, VA_RT_FORMAT_YUV420, coded_w_, coded_h_,
                          surfs.data(), pool_size_, &sa, 1);
   if (s != VA_STATUS_SUCCESS) {
-    RTC_LOG(LS_ERROR) << "vaapi: CreateSurfaces: " << va_.ErrorStr(s);
+    V4L2WC_LOG(V4L2WC_ERROR) << "vaapi: CreateSurfaces: " << va_.ErrorStr(s);
     return false;
   }
   slots_.resize(pool_size_);
@@ -102,14 +102,14 @@ bool VaapiH264Decoder::EnsureConfigured(const h264::Sps& sps) {
   s = va_.CreateContext(dpy_, config_, coded_w_, coded_h_, VA_PROGRESSIVE,
                         surfs.data(), pool_size_, &ctx);
   if (s != VA_STATUS_SUCCESS) {
-    RTC_LOG(LS_ERROR) << "vaapi: CreateContext: " << va_.ErrorStr(s);
+    V4L2WC_LOG(V4L2WC_ERROR) << "vaapi: CreateContext: " << va_.ErrorStr(s);
     return false;
   }
   context_ = ctx;
   configured_ = true;
-  RTC_LOG(LS_INFO) << "vaapi: configured " << coded_w_ << "x" << coded_h_
-                   << " pool=" << pool_size_
-                   << " ref_frames=" << sps.max_num_ref_frames;
+  V4L2WC_LOG(V4L2WC_INFO) << "vaapi: configured " << coded_w_ << "x" << coded_h_
+                          << " pool=" << pool_size_
+                          << " ref_frames=" << sps.max_num_ref_frames;
   return true;
 }
 
@@ -169,14 +169,15 @@ bool VaapiH264Decoder::DecodeSlice(const h264::Nal& nal) {
   h264::SliceHeader sh{};
   if (!h264::ParseSliceHeader(nal.rbsp.data(), nal.rbsp.size(), nal.nal_ref_idc,
                               idr, ctx, &sh)) {
-    RTC_LOG(LS_WARNING) << "vaapi: malformed slice header; dropping";
+    V4L2WC_LOG(V4L2WC_WARNING) << "vaapi: malformed slice header; dropping";
     return false;
   }
   // The hardware addresses slice data in raw-NAL bit space.
   std::uint32_t data_bit_offset = 0;
   if (!h264::RbspToRawBitOffset(nal, sh.slice_data_bit_offset_rbsp,
                                 &data_bit_offset)) {
-    RTC_LOG(LS_WARNING) << "vaapi: slice data offset outside NAL; dropping";
+    V4L2WC_LOG(V4L2WC_WARNING)
+        << "vaapi: slice data offset outside NAL; dropping";
     return false;
   }
   const int st = sh.slice_type % 5;  // 0=P 2=I
@@ -191,7 +192,7 @@ bool VaapiH264Decoder::DecodeSlice(const h264::Nal& nal) {
 
   int slot = PickFreeSlot();
   if (slot < 0) {
-    RTC_LOG(LS_ERROR) << "vaapi: no free surface";
+    V4L2WC_LOG(V4L2WC_ERROR) << "vaapi: no free surface";
     return false;
   }
   VASurfaceID surf = slots_[slot].surface;
@@ -287,7 +288,7 @@ bool VaapiH264Decoder::DecodeSlice(const h264::Nal& nal) {
   VABufferID b_pp, b_iq, b_sp, b_sd;
   auto ck = [&](VAStatus s, const char* what) {
     if (s != VA_STATUS_SUCCESS)
-      RTC_LOG(LS_ERROR) << "vaapi: " << what << ": " << va_.ErrorStr(s);
+      V4L2WC_LOG(V4L2WC_ERROR) << "vaapi: " << what << ": " << va_.ErrorStr(s);
     return s == VA_STATUS_SUCCESS;
   };
   if (!ck(va_.CreateBuffer(dpy_, context_, VAPictureParameterBufferType,
@@ -347,7 +348,7 @@ bool VaapiH264Decoder::DecodeSlice(const h264::Nal& nal) {
 
 SubmitResult VaapiH264Decoder::SubmitBitstream(const std::uint8_t* data,
                                                std::size_t size,
-                                               std::uint64_t rtp_timestamp) {
+                                               std::uint64_t timestamp) {
   auto nals = h264::ParseAnnexB(data, size);
   for (auto& n : nals) {
     if (n.type == h264::NalUnitType::kSps) {
@@ -359,8 +360,9 @@ SubmitResult VaapiH264Decoder::SubmitBitstream(const std::uint8_t* data,
         const std::uint32_t h =
             s.pic_height_in_map_units * 16 * (s.frame_mbs_only_flag ? 1 : 2);
         if (configured_ && (w != coded_w_ || h != coded_h_)) {
-          RTC_LOG(LS_INFO) << "vaapi: stream changed to " << w << "x" << h
-                           << " from " << coded_w_ << "x" << coded_h_;
+          V4L2WC_LOG(V4L2WC_INFO)
+              << "vaapi: stream changed to " << w << "x" << h << " from "
+              << coded_w_ << "x" << coded_h_;
           return SubmitResult::kSourceChange;
         }
         sps_ = s;
@@ -377,15 +379,15 @@ SubmitResult VaapiH264Decoder::SubmitBitstream(const std::uint8_t* data,
                have_sps_ && have_pps_) {
       if (!EnsureConfigured(sps_)) return SubmitResult::kError;
       if (!DecodeSlice(n)) return SubmitResult::kError;
-      if (have_ready_) slots_[ready_slot_].rtp = rtp_timestamp;
+      if (have_ready_) slots_[ready_slot_].timestamp = timestamp;
     }
   }
   return SubmitResult::kOk;
 }
 
-void VaapiH264Decoder::ExportSlot(std::uint32_t slot, std::uint64_t rtp) {
+void VaapiH264Decoder::ExportSlot(std::uint32_t slot, std::uint64_t timestamp) {
   Slot& s = slots_[slot];
-  s.rtp = rtp;
+  s.timestamp = timestamp;
   // Export once and keep the fd for the pool's lifetime, the way the V4L2
   // engine hands out its VIDIOC_EXPBUF fds. Consumers cache dma-buf imports
   // keyed on the fd, so re-exporting per frame would recycle fd numbers across
@@ -398,7 +400,8 @@ void VaapiH264Decoder::ExportSlot(std::uint32_t slot, std::uint64_t rtp) {
       dpy_, s.surface, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
       VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_COMPOSED_LAYERS, &d);
   if (st != VA_STATUS_SUCCESS) {
-    RTC_LOG(LS_ERROR) << "vaapi: ExportSurfaceHandle: " << va_.ErrorStr(st);
+    V4L2WC_LOG(V4L2WC_ERROR)
+        << "vaapi: ExportSurfaceHandle: " << va_.ErrorStr(st);
     s.fd = -1;
     return;
   }
@@ -410,7 +413,7 @@ void VaapiH264Decoder::ExportSlot(std::uint32_t slot, std::uint64_t rtp) {
     s.offsets[p] = d.layers[0].offset[p];
     s.pitches[p] = d.layers[0].pitch[p];
   }
-  s.rtp = rtp;
+  s.timestamp = timestamp;
   // Close any extra objects (single-object NV12 expected; be safe).
   for (std::uint32_t i = 1; i < d.num_objects; ++i) ::close(d.objects[i].fd);
 }
@@ -418,7 +421,7 @@ void VaapiH264Decoder::ExportSlot(std::uint32_t slot, std::uint64_t rtp) {
 bool VaapiH264Decoder::Acquire(V4l2DmaFrame* out) {
   if (!have_ready_) return false;
   std::uint32_t slot = ready_slot_;
-  ExportSlot(slot, slots_[slot].rtp);
+  ExportSlot(slot, slots_[slot].timestamp);
   if (slots_[slot].fd < 0) {
     have_ready_ = false;
     return false;
@@ -436,7 +439,7 @@ bool VaapiH264Decoder::Acquire(V4l2DmaFrame* out) {
     out->offsets[p] = s.offsets[p];
     out->pitches[p] = s.pitches[p];
   }
-  out->rtp_timestamp = s.rtp;
+  out->timestamp = s.timestamp;
   have_ready_ = false;
   return true;
 }
@@ -449,6 +452,22 @@ void VaapiH264Decoder::Release(std::uint32_t slot) {
   s.checked_out = false;
   // The surface frees for reuse once it is also no longer a reference (handled
   // by DPB eviction clearing is_reference).
+}
+
+void VaapiH264Decoder::Flush() {
+  // Drop every reference and forget the pending frame, which is what an IDR
+  // does mid-stream. Surfaces a consumer still holds stay checked out until it
+  // releases them; everything else is free for the post-seek keyframe. The
+  // decoder stays configured, so no VAAPI resources are torn down.
+  for (auto& r : dpb_) slots_[r.slot].is_reference = false;
+  dpb_.clear();
+  have_ready_ = false;
+}
+
+void VaapiH264Decoder::Drain() {
+  // VAAPI decodes synchronously: every submitted access unit has already
+  // produced its frame by the time Drive() returns, so nothing is held back
+  // and there is nothing to flush out.
 }
 
 }  // namespace v4l2wc

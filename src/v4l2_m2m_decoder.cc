@@ -13,7 +13,7 @@
 #include <cerrno>
 #include <cstring>
 
-#include "rtc_base/logging.h"
+#include "src/log.h"
 
 namespace v4l2wc {
 namespace {
@@ -77,14 +77,14 @@ std::unique_ptr<V4l2M2mDecoder> V4l2M2mDecoder::Create(
 
   dec->fd_ = ::open(device, O_RDWR | O_NONBLOCK | O_CLOEXEC);
   if (dec->fd_ < 0) {
-    RTC_LOG(LS_ERROR) << "v4l2wc: open(" << device
-                      << ") failed: " << std::strerror(errno);
+    V4L2WC_LOG(V4L2WC_ERROR)
+        << "v4l2wc: open(" << device << ") failed: " << std::strerror(errno);
     return nullptr;
   }
 
   v4l2_capability cap{};
   if (xioctl(dec->fd_, VIDIOC_QUERYCAP, &cap) != 0) {
-    RTC_LOG(LS_ERROR) << "v4l2wc: QUERYCAP failed";
+    V4L2WC_LOG(V4L2WC_ERROR) << "v4l2wc: QUERYCAP failed";
     return nullptr;
   }
   const std::uint32_t caps = (cap.capabilities & V4L2_CAP_DEVICE_CAPS)
@@ -95,8 +95,8 @@ std::unique_ptr<V4l2M2mDecoder> V4l2M2mDecoder::Create(
   } else if (caps & V4L2_CAP_VIDEO_M2M) {
     dec->mplane_ = false;
   } else {
-    RTC_LOG(LS_ERROR) << "v4l2wc: device is not an M2M decoder (caps=" << caps
-                      << ")";
+    V4L2WC_LOG(V4L2WC_ERROR)
+        << "v4l2wc: device is not an M2M decoder (caps=" << caps << ")";
     return nullptr;
   }
 
@@ -124,8 +124,8 @@ std::unique_ptr<V4l2M2mDecoder> V4l2M2mDecoder::Create(
     }
   }
   if (xioctl(dec->fd_, VIDIOC_S_FMT, &ofmt) != 0) {
-    RTC_LOG(LS_ERROR) << "v4l2wc: S_FMT OUTPUT failed: "
-                      << std::strerror(errno);
+    V4L2WC_LOG(V4L2WC_ERROR)
+        << "v4l2wc: S_FMT OUTPUT failed: " << std::strerror(errno);
     return nullptr;
   }
 
@@ -141,7 +141,7 @@ std::unique_ptr<V4l2M2mDecoder> V4l2M2mDecoder::Create(
   oreq.type = OutputType(dec->mplane_);
   oreq.memory = V4L2_MEMORY_MMAP;
   if (xioctl(dec->fd_, VIDIOC_REQBUFS, &oreq) != 0 || oreq.count == 0) {
-    RTC_LOG(LS_ERROR) << "v4l2wc: REQBUFS OUTPUT failed";
+    V4L2WC_LOG(V4L2WC_ERROR) << "v4l2wc: REQBUFS OUTPUT failed";
     return nullptr;
   }
   dec->output_buffers_.resize(oreq.count);
@@ -156,7 +156,7 @@ std::unique_ptr<V4l2M2mDecoder> V4l2M2mDecoder::Create(
       buf.m.planes = planes;
     }
     if (xioctl(dec->fd_, VIDIOC_QUERYBUF, &buf) != 0) {
-      RTC_LOG(LS_ERROR) << "v4l2wc: QUERYBUF OUTPUT " << i << " failed";
+      V4L2WC_LOG(V4L2WC_ERROR) << "v4l2wc: QUERYBUF OUTPUT " << i << " failed";
       return nullptr;
     }
     const std::size_t len = dec->mplane_ ? planes[0].length : buf.length;
@@ -164,7 +164,7 @@ std::unique_ptr<V4l2M2mDecoder> V4l2M2mDecoder::Create(
     void* ptr =
         ::mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_SHARED, dec->fd_, off);
     if (ptr == MAP_FAILED) {
-      RTC_LOG(LS_ERROR) << "v4l2wc: mmap OUTPUT " << i << " failed";
+      V4L2WC_LOG(V4L2WC_ERROR) << "v4l2wc: mmap OUTPUT " << i << " failed";
       return nullptr;
     }
     dec->output_buffers_[i] = OutputBuffer{ptr, len};
@@ -177,7 +177,7 @@ std::unique_ptr<V4l2M2mDecoder> V4l2M2mDecoder::Create(
   xioctl(dec->fd_, VIDIOC_SUBSCRIBE_EVENT, &sub);
 
   if (!StreamOn(dec->fd_, OutputType(dec->mplane_))) {
-    RTC_LOG(LS_ERROR) << "v4l2wc: STREAMON OUTPUT failed";
+    V4L2WC_LOG(V4L2WC_ERROR) << "v4l2wc: STREAMON OUTPUT failed";
     return nullptr;
   }
   dec->output_streaming_ = true;
@@ -211,7 +211,7 @@ V4l2M2mDecoder::~V4l2M2mDecoder() {
 
 SubmitResult V4l2M2mDecoder::SubmitBitstream(const std::uint8_t* data,
                                              std::size_t size,
-                                             std::uint64_t rtp_timestamp) {
+                                             std::uint64_t timestamp) {
   if (!data || size == 0) {
     return SubmitResult::kError;
   }
@@ -221,8 +221,8 @@ SubmitResult V4l2M2mDecoder::SubmitBitstream(const std::uint8_t* data,
   const std::uint32_t idx = output_free_.back();
   OutputBuffer& slot = output_buffers_[idx];
   if (size > slot.length) {
-    RTC_LOG(LS_ERROR) << "v4l2wc: coded frame " << size
-                      << " exceeds OUTPUT buffer " << slot.length;
+    V4L2WC_LOG(V4L2WC_ERROR) << "v4l2wc: coded frame " << size
+                             << " exceeds OUTPUT buffer " << slot.length;
     return SubmitResult::kError;
   }
   std::memcpy(slot.ptr, data, size);
@@ -238,8 +238,8 @@ SubmitResult V4l2M2mDecoder::SubmitBitstream(const std::uint8_t* data,
   // (see the DQBUF path). Pack it losslessly across the tv_sec/tv_usec split --
   // tv_usec's 0..999999 range holds the remainder exactly, so any token value
   // round-trips (the naive ns split truncated tokens not divisible by 1000).
-  buf.timestamp.tv_sec = static_cast<long>(rtp_timestamp / 1000000ULL);
-  buf.timestamp.tv_usec = static_cast<long>(rtp_timestamp % 1000000ULL);
+  buf.timestamp.tv_sec = static_cast<long>(timestamp / 1000000ULL);
+  buf.timestamp.tv_usec = static_cast<long>(timestamp % 1000000ULL);
   if (mplane_) {
     buf.length = 1;
     buf.m.planes = planes;
@@ -253,7 +253,8 @@ SubmitResult V4l2M2mDecoder::SubmitBitstream(const std::uint8_t* data,
   }
   if (xioctl(fd_, VIDIOC_QBUF, &buf) != 0) {
     output_free_.push_back(idx);
-    RTC_LOG(LS_ERROR) << "v4l2wc: QBUF OUTPUT failed: " << std::strerror(errno);
+    V4L2WC_LOG(V4L2WC_ERROR)
+        << "v4l2wc: QBUF OUTPUT failed: " << std::strerror(errno);
     return SubmitResult::kError;
   }
   return SubmitResult::kOk;
@@ -264,7 +265,7 @@ bool V4l2M2mDecoder::SetupCapture() {
   v4l2_format cfmt{};
   cfmt.type = CaptureType(mplane_);
   if (xioctl(fd_, VIDIOC_G_FMT, &cfmt) != 0) {
-    RTC_LOG(LS_ERROR) << "v4l2wc: G_FMT CAPTURE failed";
+    V4L2WC_LOG(V4L2WC_ERROR) << "v4l2wc: G_FMT CAPTURE failed";
     return false;
   }
   if (mplane_) {
@@ -299,11 +300,11 @@ bool V4l2M2mDecoder::SetupCapture() {
         (ncols && sizeimage) ? sizeimage / (ncols * 128) : 0;
     cap_modifier_ = Sand128ColHeight(col_lines);
     cap_uv_offset_ = cap_height_ * 128;
-    RTC_LOG(LS_INFO) << "v4l2wc: SAND geom bpl=" << cap_stride_
-                     << " sizeimage=" << sizeimage << " ncols=" << ncols
-                     << " col_lines=" << col_lines
-                     << " uv_off=" << cap_uv_offset_ << " (" << cap_width_
-                     << "x" << cap_height_ << ")";
+    V4L2WC_LOG(V4L2WC_INFO)
+        << "v4l2wc: SAND geom bpl=" << cap_stride_ << " sizeimage=" << sizeimage
+        << " ncols=" << ncols << " col_lines=" << col_lines
+        << " uv_off=" << cap_uv_offset_ << " (" << cap_width_ << "x"
+        << cap_height_ << ")";
   } else {
     cap_modifier_ = kModifierLinear;
     // The Y plane may be padded (the codec can align its height to 16/32/64),
@@ -314,10 +315,10 @@ bool V4l2M2mDecoder::SetupCapture() {
     // red).
     const std::uint32_t packed = cap_stride_ * cap_height_;
     cap_uv_offset_ = sizeimage ? (sizeimage * 2u) / 3u : packed;
-    RTC_LOG(LS_INFO) << "v4l2wc: linear NV12 stride=" << cap_stride_
-                     << " sizeimage=" << sizeimage
-                     << " uv_off=" << cap_uv_offset_ << " (packed=" << packed
-                     << ") " << cap_width_ << "x" << cap_height_;
+    V4L2WC_LOG(V4L2WC_INFO)
+        << "v4l2wc: linear NV12 stride=" << cap_stride_
+        << " sizeimage=" << sizeimage << " uv_off=" << cap_uv_offset_
+        << " (packed=" << packed << ") " << cap_width_ << "x" << cap_height_;
   }
 
   v4l2_requestbuffers creq{};
@@ -325,7 +326,7 @@ bool V4l2M2mDecoder::SetupCapture() {
   creq.type = CaptureType(mplane_);
   creq.memory = V4L2_MEMORY_MMAP;
   if (xioctl(fd_, VIDIOC_REQBUFS, &creq) != 0 || creq.count == 0) {
-    RTC_LOG(LS_ERROR) << "v4l2wc: REQBUFS CAPTURE failed";
+    V4L2WC_LOG(V4L2WC_ERROR) << "v4l2wc: REQBUFS CAPTURE failed";
     return false;
   }
   capture_buffers_.assign(creq.count, CaptureBuffer{});
@@ -340,7 +341,7 @@ bool V4l2M2mDecoder::SetupCapture() {
       buf.m.planes = planes;
     }
     if (xioctl(fd_, VIDIOC_QUERYBUF, &buf) != 0) {
-      RTC_LOG(LS_ERROR) << "v4l2wc: QUERYBUF CAPTURE " << i << " failed";
+      V4L2WC_LOG(V4L2WC_ERROR) << "v4l2wc: QUERYBUF CAPTURE " << i << " failed";
       return false;
     }
     capture_buffers_[i].length = mplane_ ? planes[0].length : buf.length;
@@ -352,7 +353,7 @@ bool V4l2M2mDecoder::SetupCapture() {
     expbuf.plane = 0;
     expbuf.flags = O_RDONLY | O_CLOEXEC;
     if (xioctl(fd_, VIDIOC_EXPBUF, &expbuf) != 0) {
-      RTC_LOG(LS_ERROR) << "v4l2wc: EXPBUF CAPTURE " << i << " failed";
+      V4L2WC_LOG(V4L2WC_ERROR) << "v4l2wc: EXPBUF CAPTURE " << i << " failed";
       return false;
     }
     capture_buffers_[i].dmabuf_fd = expbuf.fd;
@@ -368,20 +369,20 @@ bool V4l2M2mDecoder::SetupCapture() {
       qbuf.m.planes = qplanes;
     }
     if (xioctl(fd_, VIDIOC_QBUF, &qbuf) != 0) {
-      RTC_LOG(LS_ERROR) << "v4l2wc: QBUF CAPTURE " << i << " failed";
+      V4L2WC_LOG(V4L2WC_ERROR) << "v4l2wc: QBUF CAPTURE " << i << " failed";
       return false;
     }
     capture_buffers_[i].queued = true;
   }
 
   if (!StreamOn(fd_, CaptureType(mplane_))) {
-    RTC_LOG(LS_ERROR) << "v4l2wc: STREAMON CAPTURE failed";
+    V4L2WC_LOG(V4L2WC_ERROR) << "v4l2wc: STREAMON CAPTURE failed";
     return false;
   }
   capture_streaming_ = true;
-  RTC_LOG(LS_INFO) << "v4l2wc: CAPTURE up " << cap_width_ << "x" << cap_height_
-                   << " stride=" << cap_stride_
-                   << " buffers=" << capture_buffers_.size();
+  V4L2WC_LOG(V4L2WC_INFO) << "v4l2wc: CAPTURE up " << cap_width_ << "x"
+                          << cap_height_ << " stride=" << cap_stride_
+                          << " buffers=" << capture_buffers_.size();
   return true;
 }
 
@@ -416,7 +417,7 @@ DriveResult V4l2M2mDecoder::Drive() {
         }
       } else {
         // Mid-stream resolution change: the caller recreates the decoder.
-        RTC_LOG(LS_INFO) << "v4l2wc: mid-stream SOURCE_CHANGE; recreate";
+        V4L2WC_LOG(V4L2WC_INFO) << "v4l2wc: mid-stream SOURCE_CHANGE; recreate";
         return DriveResult::kSourceChange;
       }
     }
@@ -465,7 +466,7 @@ DriveResult V4l2M2mDecoder::Drive() {
       ready_index_ = buf.index;
       // Recover the passthrough token with the same packing SubmitBitstream
       // used (tv_sec * 1e6 + tv_usec), so it round-trips exactly.
-      ready_rtp_ =
+      ready_timestamp_ =
           static_cast<std::uint64_t>(buf.timestamp.tv_sec) * 1000000ULL +
           static_cast<std::uint64_t>(buf.timestamp.tv_usec);
     }
@@ -492,7 +493,7 @@ bool V4l2M2mDecoder::Acquire(V4l2DmaFrame* out) {
   // (same 'NV12' fourcc); the modifier distinguishes them.
   out->drm_fourcc = V4L2_PIX_FMT_NV12;
   out->modifier = cap_modifier_;
-  out->rtp_timestamp = ready_rtp_;
+  out->timestamp = ready_timestamp_;
 
   // NV12 is two DRM planes (Y then interleaved UV) from one buffer. For the
   // SAND modifier the AddFB2 stride is the image width (per drm_fourcc.h) and
@@ -509,6 +510,23 @@ bool V4l2M2mDecoder::Acquire(V4l2DmaFrame* out) {
   return true;
 }
 
+bool V4l2M2mDecoder::QueueCaptureBuffer(std::uint32_t index) {
+  v4l2_buffer buf{};
+  v4l2_plane planes[VIDEO_MAX_PLANES]{};
+  buf.type = CaptureType(mplane_);
+  buf.memory = V4L2_MEMORY_MMAP;
+  buf.index = index;
+  if (mplane_) {
+    buf.length = 1;
+    buf.m.planes = planes;
+  }
+  if (xioctl(fd_, VIDIOC_QBUF, &buf) != 0) {
+    return false;
+  }
+  capture_buffers_[index].queued = true;
+  return true;
+}
+
 void V4l2M2mDecoder::Release(std::uint32_t capture_index) {
   if (capture_index >= capture_buffers_.size()) {
     return;
@@ -516,18 +534,55 @@ void V4l2M2mDecoder::Release(std::uint32_t capture_index) {
   if (capture_buffers_[capture_index].queued) {
     return;  // already back with the decoder
   }
-  v4l2_buffer buf{};
-  v4l2_plane planes[VIDEO_MAX_PLANES]{};
-  buf.type = CaptureType(mplane_);
-  buf.memory = V4L2_MEMORY_MMAP;
-  buf.index = capture_index;
-  if (mplane_) {
-    buf.length = 1;
-    buf.m.planes = planes;
+  QueueCaptureBuffer(capture_index);
+}
+
+void V4l2M2mDecoder::Flush() {
+  // Stop both queues: the driver drops every queued access unit and every
+  // decoded frame. STREAMOFF on a queue that is not streaming is harmless.
+  if (output_streaming_) {
+    StreamOff(fd_, OutputType(mplane_));
+    output_streaming_ = false;
   }
-  if (xioctl(fd_, VIDIOC_QBUF, &buf) == 0) {
-    capture_buffers_[capture_index].queued = true;
+  if (capture_streaming_) {
+    StreamOff(fd_, CaptureType(mplane_));
+    capture_streaming_ = false;
   }
+  have_ready_ = false;
+
+  // Every OUTPUT buffer is free again, and the queue restarts so the next
+  // access unit can be submitted.
+  output_free_.clear();
+  for (std::uint32_t i = 0; i < output_buffers_.size(); ++i) {
+    output_free_.push_back(i);
+  }
+  if (!output_buffers_.empty() && StreamOn(fd_, OutputType(mplane_))) {
+    output_streaming_ = true;
+  }
+
+  // If CAPTURE was already configured, requeue its buffers and restart it. A
+  // seek that also changes geometry is handled by the caller recreating the
+  // decoder, so the buffers here still fit the stream.
+  if (!capture_buffers_.empty()) {
+    for (auto& cb : capture_buffers_) {
+      cb.queued = false;
+    }
+    for (std::uint32_t i = 0; i < capture_buffers_.size(); ++i) {
+      QueueCaptureBuffer(i);
+    }
+    if (StreamOn(fd_, CaptureType(mplane_))) {
+      capture_streaming_ = true;
+    }
+  }
+}
+
+void V4l2M2mDecoder::Drain() {
+  // Tell the stateful decoder there is no more input, so it emits the frames
+  // it still holds; Drive()/Acquire() then pump them out. Best effort: a
+  // driver that does not implement the command simply ignores it.
+  v4l2_decoder_cmd cmd{};
+  cmd.cmd = V4L2_DEC_CMD_STOP;
+  xioctl(fd_, VIDIOC_DECODER_CMD, &cmd);
 }
 
 }  // namespace v4l2wc

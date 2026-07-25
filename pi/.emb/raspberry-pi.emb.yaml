@@ -1,0 +1,16 @@
+id: pi-hevc-stateless
+type: app
+supported_archs: [arm64]
+supported_host_types: [fedora, ubuntu]
+cross:
+  targets:
+    rpi4-trixie:
+      extends: rpi4-trixie
+      backends:
+        default:
+          CMAKE_BUILD_TYPE: Release
+    rpi5-trixie:
+      extends: rpi5-trixie
+      backends:
+        default:
+          CMAKE_BUILD_TYPE: Release

@@ -33,7 +33,17 @@ struct V4l2DmaFrame {
   std::array<int, kMaxPlanes> fds{-1, -1, -1, -1};
   std::array<std::uint32_t, kMaxPlanes> offsets{0, 0, 0, 0};
   std::array<std::uint32_t, kMaxPlanes> pitches{0, 0, 0, 0};
-  std::uint64_t rtp_timestamp = 0;  // opaque passthrough token (frame RTP ts)
+  std::uint64_t timestamp = 0;  // opaque passthrough: a PTS for HLS, an RTP ts
+                                // for WebRTC; the engine never interprets it
+
+  // Colorimetry from the bitstream VUI (H.265 Table E.3/E.4/E.5), or the
+  // "unspecified" default (2) when the stream omits it. A sink maps these onto
+  // its color model so YUV converts to RGB correctly; a YUV frame with the
+  // wrong matrix is the classic washed-out / oversaturated video.
+  std::uint8_t colour_primaries = 2;
+  std::uint8_t transfer_characteristics = 2;
+  std::uint8_t matrix_coefficients = 2;
+  bool video_full_range = false;
 };
 
 // What a Drive() pass found. A resolution change is not an error: the stream
@@ -60,13 +70,28 @@ class IDmaDecoder {
   // Feed one coded access unit.
   virtual SubmitResult SubmitBitstream(const std::uint8_t* data,
                                        std::size_t size,
-                                       std::uint64_t rtp_timestamp) = 0;
+                                       std::uint64_t timestamp) = 0;
   // Pump without blocking.
   virtual DriveResult Drive() = 0;
   // Hand out the newest ready frame as borrowed dma-buf fds; false if none.
   virtual bool Acquire(V4l2DmaFrame* out) = 0;
   // Return a previously acquired frame's capture slot for reuse.
   virtual void Release(std::uint32_t capture_index) = 0;
+
+  // Discard all pending input and buffered output and return to a state ready
+  // to decode a fresh access unit. This is the seek and stream-reset path,
+  // which WebRTC never needed. The caller must Release() any acquired frame
+  // first; nothing new is produced until the next SubmitBitstream(), which is
+  // expected to carry a keyframe. A seek that also changes geometry is instead
+  // handled by recreating the decoder, as SubmitResult::kSourceChange already
+  // requires.
+  virtual void Flush() = 0;
+
+  // Signal end of stream so the engine emits whatever it still holds. After a
+  // Drain(), Drive() and Acquire() pump out the remaining frames; a later
+  // SubmitBitstream() resumes normal decoding. A synchronous engine has
+  // nothing pending and may treat this as a no-op.
+  virtual void Drain() = 0;
 
   // How many buffers the engine decodes into, or 0 before the pool exists.
   // Passed on to consumers so they can bound what they hold: a consumer that
