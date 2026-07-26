@@ -11,7 +11,22 @@ project(v4l2_webrtc_codec_parse LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-enable_testing()
+
+# When embedded via add_subdirectory (e.g. as a submodule), a consumer wants
+# only the libraries -- not the parser unit tests, which would otherwise
+# register with the parent's ctest. Build the tests only when v4l2wc is the
+# top-level project. (PROJECT_IS_TOP_LEVEL needs CMake 3.21; this idiom works on
+# the 3.16 floor.)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  set(_v4l2wc_default_tests ON)
+else()
+  set(_v4l2wc_default_tests OFF)
+endif()
+option(V4L2WC_BUILD_TESTS "Build v4l2wc parser/core unit tests"
+  ${_v4l2wc_default_tests})
+if(V4L2WC_BUILD_TESTS)
+  enable_testing()
+endif()
 
 add_library(v4l2wc_parse STATIC
   parse/h264/nal.cc
@@ -27,6 +42,7 @@ add_library(v4l2wc_parse STATIC
 target_include_directories(v4l2wc_parse PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(v4l2wc_parse PRIVATE -Wall -Wextra)
 
+if(V4L2WC_BUILD_TESTS)
 add_executable(h264_nal_test test/parse/h264_nal_test.cc)
 target_link_libraries(h264_nal_test PRIVATE v4l2wc_parse)
 add_test(NAME h264_nal_test COMMAND h264_nal_test)
@@ -62,6 +78,7 @@ add_test(NAME h265_scaling_list_test COMMAND h265_scaling_list_test)
 add_executable(h265_slice_header_test test/parse/h265_slice_header_test.cc)
 target_link_libraries(h265_slice_header_test PRIVATE v4l2wc_parse)
 add_test(NAME h265_slice_header_test COMMAND h265_slice_header_test)
+endif()  # V4L2WC_BUILD_TESTS (parser tests)
 
 # ---- webrtc-free decode core -----------------------------------------------
 # The decode engines, hoisted out of the libwebrtc build so a consumer that is
@@ -99,9 +116,11 @@ else()
   message(STATUS "v4l2wc_core: libva headers not found, VAAPI engine disabled")
 endif()
 
+if(V4L2WC_BUILD_TESTS)
 add_executable(v4l2wc_core_test test/core/core_smoke_test.cc)
 target_link_libraries(v4l2wc_core_test PRIVATE v4l2wc_core)
 add_test(NAME v4l2wc_core_test COMMAND v4l2wc_core_test)
+endif()  # V4L2WC_BUILD_TESTS (core smoke test)
 
 # On-hardware tests need a real VAAPI/V4L2 device and a stream argument, so they
 # are opt-in and never registered with ctest. Validated on an AMD Radeon
@@ -147,7 +166,7 @@ check_cxx_source_compiles(
   V4L2WC_HAVE_LIBFUZZER)
 unset(CMAKE_REQUIRED_FLAGS)
 
-if(V4L2WC_HAVE_LIBFUZZER)
+if(V4L2WC_BUILD_TESTS AND V4L2WC_HAVE_LIBFUZZER)
   # Each entry pairs a fuzz target name with the parser sources its harness
   # links, so a crash points at a single parser. The H.264 targets share the
   # whole H.264 parser; the H.265 one links only its own translation unit.
