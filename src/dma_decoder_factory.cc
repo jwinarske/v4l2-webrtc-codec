@@ -47,8 +47,15 @@ std::unique_ptr<IDmaDecoder> CreateDmaDecoder(const DmaDecoderConfig& config) {
         (config.v4l2_hevc_device != nullptr && config.v4l2_hevc_device[0])
             ? config.v4l2_hevc_device
             : "/dev/video19";
+    // Pool must cover the max DPB (reference + reorder pictures the decoder
+    // keeps live) PLUS the frames in flight to the compositor -- on the RPi
+    // stateless decoder the CAPTURE buffers double as DPB slots, so every
+    // buffer held on a plane removes a DPB slot. 16 left too few once the
+    // KMS-plane compositor held ~8, starving the DPB ("Missing inuse DPB ent")
+    // and stalling decode a few seconds in. 28 matches the VAAPI path's
+    // headroom below.
     if (auto stateless =
-            V4l2StatelessH265Decoder::Create(hevc_node, /*pool_size=*/16)) {
+            V4l2StatelessH265Decoder::Create(hevc_node, /*pool_size=*/28)) {
       V4L2WC_LOG(V4L2WC_INFO)
           << "v4l2wc: V4L2 stateless HEVC decoder on " << hevc_node << " "
           << config.coded_width << "x" << config.coded_height;
