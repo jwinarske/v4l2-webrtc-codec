@@ -3,12 +3,15 @@
 
 #include "src/v4l2_encoder.h"
 
+#include <cstdlib>
 #include <cstring>
 
 #include "absl/strings/match.h"
+#include "api/units/time_delta.h"
 #include "api/video/encoded_image.h"
 #include "api/video/i420_buffer.h"
 #include "api/video/video_frame_buffer.h"
+#include "api/video/video_timing.h"
 #include "api/video_codecs/video_codec.h"
 #include "media/base/media_constants.h"
 #include "modules/video_coding/codecs/h264/include/h264.h"
@@ -175,6 +178,18 @@ int32_t V4l2Encoder::Deliver(const std::vector<uint8_t>& au, bool keyframe,
   image.capture_time_ms_ = frame.render_time_ms();
   image._frameType = keyframe ? webrtc::VideoFrameType::kVideoFrameKey
                               : webrtc::VideoFrameType::kVideoFrameDelta;
+
+  // Latency knob: attach a playout-delay hint so the receiver minimizes its
+  // jitter buffer (the dominant latency term). It rides the playout-delay RTP
+  // header extension, negotiated by default. IVI_ENC_PLAYOUT_MS=<max_ms> sets
+  // the delay to {0, max_ms}; 0 asks the receiver to render as fast as it can.
+  // Unset leaves webrtc's default adaptive buffering.
+  static const char* pd_env = std::getenv("IVI_ENC_PLAYOUT_MS");
+  static const int pd_max_ms = pd_env != nullptr ? std::atoi(pd_env) : -1;
+  if (pd_max_ms >= 0) {
+    image.SetPlayoutDelay(webrtc::VideoPlayoutDelay(
+        webrtc::TimeDelta::Millis(0), webrtc::TimeDelta::Millis(pd_max_ms)));
+  }
 
   webrtc::CodecSpecificInfo codec_specific;
   codec_specific.codecType = webrtc::kVideoCodecH264;
