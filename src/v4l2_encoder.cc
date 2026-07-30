@@ -63,6 +63,16 @@ int V4l2Encoder::InitEncode(
           ? codec_settings->startBitrate * 1000
           : (config_.default_bitrate_bps != 0 ? config_.default_bitrate_bps
                                               : 2'000'000);
+  // IVI_ENC_BITRATE=<bps> overrides the initial bitrate and, in SetRates below,
+  // acts as a floor webrtc's rate control cannot drop under. Useful when the
+  // negotiated rate is too low for the content -- e.g. smooth gradients band at
+  // the ~2 Mbps default for 1920x720.
+  if (const char* br = std::getenv("IVI_ENC_BITRATE")) {
+    const long v = std::atol(br);
+    if (v > 0) {
+      bitrate_bps_ = static_cast<uint32_t>(v);
+    }
+  }
   const uint32_t gop = framerate_ * 2;  // ~2s GOP; SetRates can request sooner.
   const char* device =
       (config_.video_device != nullptr && config_.video_device[0] != '\0')
@@ -206,7 +216,17 @@ void V4l2Encoder::SetRates(const RateControlParameters& parameters) {
   if (!engine_) {
     return;
   }
-  const uint32_t bps = parameters.bitrate.get_sum_bps();
+  // IVI_ENC_BITRATE (see InitEncode) is a floor here so webrtc's BWE cannot
+  // drive the rate back below it mid-stream.
+  static const uint32_t bps_floor = [] {
+    const char* br = std::getenv("IVI_ENC_BITRATE");
+    const long v = br != nullptr ? std::atol(br) : 0;
+    return v > 0 ? static_cast<uint32_t>(v) : 0u;
+  }();
+  uint32_t bps = parameters.bitrate.get_sum_bps();
+  if (bps_floor != 0 && bps < bps_floor) {
+    bps = bps_floor;
+  }
   if (bps != 0 && bps != bitrate_bps_) {
     bitrate_bps_ = bps;
     engine_->SetBitrate(bps);
