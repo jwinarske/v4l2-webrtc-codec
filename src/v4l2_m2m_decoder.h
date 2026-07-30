@@ -21,6 +21,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <vector>
 
@@ -108,9 +109,17 @@ class V4l2M2mDecoder : public IDmaDecoder {
   std::uint32_t cap_uv_offset_ = 0;  // byte offset of the UV plane
   std::uint64_t cap_modifier_ = 0;   // DRM_FORMAT_MOD_* (0 = LINEAR, else SAND)
 
-  bool have_ready_ = false;
-  std::uint32_t ready_index_ = 0;
-  std::uint64_t ready_timestamp_ = 0;
+  // Decoded CAPTURE buffers awaiting Acquire, in decode order. A FIFO, not a
+  // single latest-wins slot: the HLS/VOD consumer wants every frame, and the
+  // frame scheduler downstream drops any that are late -- keeping only the
+  // newest here discarded ~6 of every 7 frames (choppy playback). Bounded
+  // naturally by the CAPTURE pool: a queued buffer is not returned to the
+  // driver until the consumer Releases it.
+  struct ReadyFrame {
+    std::uint32_t index = 0;
+    std::uint64_t timestamp = 0;
+  };
+  std::deque<ReadyFrame> ready_;
 };
 
 }  // namespace v4l2wc

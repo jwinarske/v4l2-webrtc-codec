@@ -30,11 +30,15 @@ std::unique_ptr<IDmaDecoder> CreateDmaDecoder(const DmaDecoderConfig& config) {
       static_cast<std::size_t>(config.coded_width) * config.coded_height,
       std::size_t{1} << 20);
 
-  // The V4L2 M2M stateful engine first: the embedded path.
+  // The V4L2 M2M stateful engine first: the embedded path. CAPTURE pool sized
+  // like the stateless path below (not the V4L2 default 16): the compositor and
+  // the frame pipeline hold several decoded buffers at once (on a plane,
+  // queued, decoded-ahead), and 16 left too few free to sustain decode -- it
+  // stalled a couple of seconds in once frames piled up.
   if (auto v4l2 = V4l2M2mDecoder::Create(
           device, config.codec_fourcc, V4L2_PIX_FMT_NV12, config.coded_width,
           config.coded_height, /*output_buffer_count=*/4,
-          /*capture_buffer_count=*/16, output_buffer_size)) {
+          /*capture_buffer_count=*/28, output_buffer_size)) {
     V4L2WC_LOG(V4L2WC_INFO) << "v4l2wc: V4L2 M2M decoder on " << device << " "
                             << config.coded_width << "x" << config.coded_height;
     return v4l2;

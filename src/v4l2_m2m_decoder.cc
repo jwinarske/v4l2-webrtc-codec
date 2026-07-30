@@ -66,7 +66,13 @@ std::unique_ptr<V4l2M2mDecoder> V4l2M2mDecoder::Create(
     std::uint32_t capture_fourcc, std::uint32_t coded_width,
     std::uint32_t coded_height, std::uint32_t output_buffer_count,
     std::uint32_t capture_buffer_count, std::size_t output_buffer_size) {
-  if (!device || !device[0] || coded_width == 0 || coded_height == 0) {
+  // coded_width/height may be 0: a stateful decoder detects the resolution from
+  // the stream via V4L2_EVENT_SOURCE_CHANGE (see the S_FMT OUTPUT below), so
+  // the caller need not parse an SPS first. They only floor output_buffer_size,
+  // which the caller has already computed. Rejecting 0x0 here would send the
+  // H.264 path (which has no stateless fallback like HEVC's /dev/video19)
+  // straight to "no decode engine".
+  if (!device || !device[0]) {
     return nullptr;
   }
 
@@ -126,6 +132,19 @@ std::unique_ptr<V4l2M2mDecoder> V4l2M2mDecoder::Create(
   if (xioctl(dec->fd_, VIDIOC_S_FMT, &ofmt) != 0) {
     V4L2WC_LOG(V4L2WC_ERROR)
         << "v4l2wc: S_FMT OUTPUT failed: " << std::strerror(errno);
+    return nullptr;
+  }
+  // S_FMT adjusts an unsupported coded pixelformat to one the device does
+  // support rather than failing, so verify the codec was actually accepted --
+  // otherwise this M2M node (e.g. bcm2835-codec, which has no HEVC) would come
+  // up misconfigured instead of letting the factory fall through to the next
+  // engine (the stateless HEVC decoder on the Pi).
+  const std::uint32_t got_fourcc =
+      dec->mplane_ ? ofmt.fmt.pix_mp.pixelformat : ofmt.fmt.pix.pixelformat;
+  if (got_fourcc != codec_fourcc) {
+    V4L2WC_LOG(V4L2WC_INFO) << "v4l2wc: M2M on " << device
+                            << " does not support the requested codec "
+                               "(fourcc adjusted); trying next engine";
     return nullptr;
   }
 
@@ -439,7 +458,11 @@ DriveResult V4l2M2mDecoder::Drive() {
     output_free_.push_back(buf.index);
   }
 
-  // Dequeue decoded CAPTURE buffers, keeping only the newest (latest-wins).
+  // Dequeue decoded CAPTURE buffers into the ready FIFO, in decode order. Every
+  // frame is kept (see ready_ in the header): the consumer drains them via
+  // Acquire and the frame scheduler drops any that are late. A queued buffer
+  // stays out of the driver until the consumer Releases it, so the CAPTURE pool
+  // bounds the queue.
   if (capture_streaming_) {
     for (;;) {
       v4l2_buffer buf{};
@@ -456,30 +479,24 @@ DriveResult V4l2M2mDecoder::Drive() {
       if (buf.index < capture_buffers_.size()) {
         capture_buffers_[buf.index].queued = false;
       }
-      // Drop any prior ready-but-unacquired buffer back to the decoder.
-      if (have_ready_ && ready_index_ != buf.index &&
-          ready_index_ < capture_buffers_.size() &&
-          !capture_buffers_[ready_index_].queued) {
-        Release(ready_index_);
-      }
-      have_ready_ = true;
-      ready_index_ = buf.index;
       // Recover the passthrough token with the same packing SubmitBitstream
       // used (tv_sec * 1e6 + tv_usec), so it round-trips exactly.
-      ready_timestamp_ =
+      const std::uint64_t timestamp =
           static_cast<std::uint64_t>(buf.timestamp.tv_sec) * 1000000ULL +
           static_cast<std::uint64_t>(buf.timestamp.tv_usec);
+      ready_.push_back(ReadyFrame{buf.index, timestamp});
     }
   }
   return DriveResult::kOk;
 }
 
 bool V4l2M2mDecoder::Acquire(V4l2DmaFrame* out) {
-  if (!have_ready_ || !out) {
+  if (ready_.empty() || !out) {
     return false;
   }
-  const std::uint32_t idx = ready_index_;
-  have_ready_ = false;
+  const ReadyFrame rf = ready_.front();
+  ready_.pop_front();
+  const std::uint32_t idx = rf.index;
   if (idx >= capture_buffers_.size()) {
     return false;
   }
@@ -493,7 +510,7 @@ bool V4l2M2mDecoder::Acquire(V4l2DmaFrame* out) {
   // (same 'NV12' fourcc); the modifier distinguishes them.
   out->drm_fourcc = V4L2_PIX_FMT_NV12;
   out->modifier = cap_modifier_;
-  out->timestamp = ready_timestamp_;
+  out->timestamp = rf.timestamp;
 
   // NV12 is two DRM planes (Y then interleaved UV) from one buffer. For the
   // SAND modifier the AddFB2 stride is the image width (per drm_fourcc.h) and
@@ -548,7 +565,7 @@ void V4l2M2mDecoder::Flush() {
     StreamOff(fd_, CaptureType(mplane_));
     capture_streaming_ = false;
   }
-  have_ready_ = false;
+  ready_.clear();
 
   // Every OUTPUT buffer is free again, and the queue restarts so the next
   // access unit can be submitted.
